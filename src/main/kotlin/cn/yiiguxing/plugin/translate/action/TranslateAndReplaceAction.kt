@@ -1,30 +1,29 @@
 package cn.yiiguxing.plugin.translate.action
 
+import cn.yiiguxing.plugin.translate.Settings
+import cn.yiiguxing.plugin.translate.TranslationStates
 import cn.yiiguxing.plugin.translate.adaptedMessage
 import cn.yiiguxing.plugin.translate.message
-import cn.yiiguxing.plugin.translate.trans.Lang
-import cn.yiiguxing.plugin.translate.trans.TranslateListener
-import cn.yiiguxing.plugin.translate.trans.Translation
+import cn.yiiguxing.plugin.translate.trans.*
 import cn.yiiguxing.plugin.translate.ui.SpeedSearchListPopupStep
 import cn.yiiguxing.plugin.translate.ui.showListPopup
 import cn.yiiguxing.plugin.translate.util.*
-import com.intellij.codeInsight.lookup.LookupElementBuilder
-import com.intellij.codeInsight.lookup.LookupEvent
-import com.intellij.codeInsight.lookup.LookupListener
-import com.intellij.codeInsight.lookup.LookupManager
+import com.intellij.codeInsight.lookup.*
 import com.intellij.lang.Language
-import com.intellij.openapi.actionSystem.AnActionEvent
-import com.intellij.openapi.actionSystem.CommonDataKeys
-import com.intellij.openapi.actionSystem.LangDataKeys
-import com.intellij.openapi.actionSystem.PlatformDataKeys
-import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.command.WriteCommandAction
+import com.intellij.openapi.actionSystem.*
+import com.intellij.openapi.application.ModalityState
+import com.intellij.openapi.application.WriteAction
+import com.intellij.openapi.command.CommandProcessor
+import com.intellij.openapi.diagnostic.logger
+import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.ScrollType
 import com.intellij.openapi.editor.markup.*
 import com.intellij.openapi.editor.textarea.TextComponentEditor
 import com.intellij.openapi.editor.textarea.TextComponentEditorImpl
 import com.intellij.openapi.fileTypes.PlainTextLanguage
+import com.intellij.openapi.progress.impl.BackgroundableProcessIndicator
+import com.intellij.openapi.progress.util.AbstractProgressIndicatorExBase
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.popup.PopupStep
 import com.intellij.openapi.util.TextRange
@@ -33,13 +32,14 @@ import com.intellij.openapi.vfs.ReadonlyStatusHandler
 import com.intellij.ui.JBColor
 import com.intellij.util.concurrency.EdtScheduledExecutorService
 import java.lang.ref.WeakReference
+import java.util.*
 import java.util.concurrent.TimeUnit
 import javax.swing.text.JTextComponent
 
 /**
  * 翻译并替换
  */
-class TranslateAndReplaceAction : AutoSelectAction(true, NON_WHITESPACE_CONDITION) {
+class TranslateAndReplaceAction : AutoSelectAction(true, NON_WHITESPACE_CONDITION), PopupAction {
 
     init {
         isEnabledInModalContext = true
@@ -48,7 +48,7 @@ class TranslateAndReplaceAction : AutoSelectAction(true, NON_WHITESPACE_CONDITIO
     }
 
     override val selectionMode: SelectionMode
-        get() = Settings.autoSelectionMode
+        get() = Settings.getInstance().autoSelectionMode
 
     override val AnActionEvent.editor: Editor?
         get() {
@@ -76,94 +76,146 @@ class TranslateAndReplaceAction : AutoSelectAction(true, NON_WHITESPACE_CONDITIO
     }
 
     override fun onActionPerformed(event: AnActionEvent, editor: Editor, selectionRange: TextRange) {
+        val language = event.getData(LangDataKeys.LANGUAGE)
         val project = editor.project ?: CommonDataKeys.PROJECT.getData(event.dataContext)
         val document = editor.document
-        val isWritable =
-            project?.let { ReadonlyStatusHandler.ensureDocumentWritable(it, document) } ?: document.isWritable
+        val isWritable = project
+            ?.let { ReadonlyStatusHandler.ensureDocumentWritable(it, document) }
+            ?: document.isWritable
         if (!isWritable) {
             return
         }
-        if (!TranslateService.translator.checkConfiguration()) {
+        val translateService = TranslateService.getInstance()
+        if (!translateService.translator.checkConfiguration()) {
             return
         }
 
-        val language = event.getData(LangDataKeys.LANGUAGE)
+        // 不要在这下面使用`event`，否则将可能会出现 `cannot share data context between Swing events` 错误。
+        // 因为`TranslateService.translator.checkConfiguration()`可能会占用很长的时间并等待，
+        // 之后`event`中的`DataContext`就可能变得不可使用了。详见：
+        // https://intellij-support.jetbrains.com/hc/en-us/community/posts/207379815-AnActionEvent-cannot-share-data-context-between-Swing-events-
+
         val editorRef = WeakReference(editor)
-        editor.document.getText(selectionRange)
+        val text = editor.document.getText(selectionRange)
             .takeIf { it.isNotBlank() && it.any(JAVA_IDENTIFIER_PART_CONDITION) }
-            ?.let { text ->
-                val processedText = text.processBeforeTranslate() ?: text
-                val primaryLanguage = TranslateService.translator.primaryLanguage
-                fun translate(targetLang: Lang, reTranslate: Boolean = false) {
-                    TranslateService.translate(processedText, Lang.AUTO, targetLang, object : TranslateListener {
-                        override fun onSuccess(translation: Translation) {
-                            if (reTranslate && translation.srcLang == Lang.ENGLISH
-                                && primaryLanguage != Lang.ENGLISH
-                                && targetLang == Lang.ENGLISH
-                            ) {
-                                val delay = TranslateService.translator.intervalLimit
-                                if (delay <= 0) {
-                                    translate(primaryLanguage)
-                                } else {
-                                    EdtScheduledExecutorService.getInstance()
-                                        .schedule({ translate(primaryLanguage) }, delay.toLong(), TimeUnit.MILLISECONDS)
-                                }
-                            } else {
-                                val translationSet =
-                                    translation.dictDocument?.translations?.toMutableSet() ?: mutableSetOf()
-                                translation.translation?.let { translationSet.add(it) }
-                                val items = translationSet
-                                    .asSequence()
-                                    .filter { it.isNotEmpty() }
-                                    .map { it.fixWhitespace() }
-                                    .toList()
-                                val elementsToReplace = createReplaceElements(language, items, translation.targetLang)
+            ?: return
+        val processedText = text.trim().splitCamelCaseWords()
+        val primaryLanguage = translateService.translator.primaryLanguage
 
-                                editorRef.get()?.let { e ->
-                                    invokeLater {
-                                        if (e is TextComponentEditor) {
-                                            e.showListPopup(selectionRange, text, elementsToReplace)
-                                        } else if (project != null) {
-                                            e.showLookup(project, selectionRange, text, elementsToReplace)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        override fun onError(message: String, throwable: Throwable) {
-                            editorRef.get()?.let { editor ->
-                                invokeLater {
-                                    if (editor is TextComponentEditor) {
-                                        editor.showListPopup(selectionRange, text, emptyList())
-                                    } else if (project != null) {
-                                        editor.showLookup(project, selectionRange, text, emptyList())
-                                    }
-                                }
-                                Notifications.showErrorNotification(
-                                    editor.project,
-                                    message("translate.and.replace.notification.title"),
-                                    message,
-                                    throwable
-                                )
-                            }
-                        }
-                    })
-                }
-
-                if (Settings.selectTargetLanguageBeforeReplacement) {
-                    editor.showTargetLanguagesPopup { translate(it) }
-                } else {
-                    val targetLang = if (processedText.any(NON_LATIN_CONDITION)) Lang.ENGLISH else primaryLanguage
-                    translate(targetLang, true)
-                }
+        val indicator = Indicator(project, editorRef).apply { setProgressText(processedText) }
+        val modalityState = ModalityState.current()
+        fun translate(targetLang: Lang, reTranslate: Boolean = false) {
+            if (indicator.checkProcessCanceledAndEditorDisposed()) {
+                return
             }
+            translateService.translate(processedText, Lang.AUTO, targetLang, object : TranslateListener {
+                override fun onSuccess(translation: Translation) {
+                    if (indicator.checkProcessCanceledAndEditorDisposed()) {
+                        return
+                    }
+                    if (reTranslate
+                        && translation.srcLang == Lang.ENGLISH
+                        && primaryLanguage != Lang.ENGLISH
+                        && targetLang == Lang.ENGLISH
+                    ) {
+                        val delay = translateService.translator.intervalLimit
+                        if (delay <= 0) {
+                            translate(primaryLanguage)
+                        } else {
+                            EdtScheduledExecutorService.getInstance()
+                                .schedule({ translate(primaryLanguage) }, delay.toLong(), TimeUnit.MILLISECONDS)
+                        }
+                    } else {
+                        indicator.processFinish()
+                        val elementsToReplace = createReplaceElements(translation, language)
+                        editorRef.get()?.showResultsIfNeeds(selectionRange, text, elementsToReplace)
+                    }
+                }
+
+                override fun onError(throwable: Throwable) {
+                    if (indicator.checkProcessCanceledAndEditorDisposed()) {
+                        return
+                    }
+
+                    indicator.processFinish()
+                    editorRef.get()?.showResultsIfNeeds(selectionRange, text, emptyList())
+                    TranslationNotifications.showTranslationErrorNotification(
+                        project, message("translate.and.replace.notification.title"), null, throwable
+                    )
+                }
+            }, modalityState)
+        }
+
+        if (Settings.getInstance().selectTargetLanguageBeforeReplacement) {
+            editor.showTargetLanguagesPopup { translate(it) }
+        } else {
+            val targetLang = if (processedText.any(NON_LATIN_CONDITION)) Lang.ENGLISH else primaryLanguage
+            translate(targetLang, true)
+        }
     }
+
+
+    private class Indicator(
+        val project: Project?,
+        val editorRef: WeakReference<Editor>
+    ) : BackgroundableProcessIndicator(
+        project,
+        message("action.TranslateAndReplaceAction.description"),
+        null,
+        null,
+        true
+    ) {
+
+        init {
+            initDelegate()
+            start()
+            isIndeterminate = true
+            text = message("action.TranslateAndReplaceAction.task.text")
+        }
+
+        private fun initDelegate() {
+            addStateDelegate(object : AbstractProgressIndicatorExBase() {
+                override fun cancel() {
+                    // 在用户取消的时候使`progressIndicator`立即结束并且不再显示
+                    this@Indicator.processFinish()
+                }
+            })
+        }
+
+        fun setProgressText(text: String) {
+            text2 = message("action.TranslateAndReplaceAction.task.text2", text)
+        }
+
+        fun checkProcessCanceledAndEditorDisposed(): Boolean {
+            if (isCanceled) {
+                // no need to finish the progress indicator,
+                // because it's already finished in the delegate.
+                return true
+            }
+            if ((project != null && project.isDisposed) || editorRef.get().let { it == null || it.isDisposed }) {
+                processFinish()
+                return true
+            }
+            return false
+        }
+    }
+
+
+    private class TranslationItemRenderer : LookupElementRenderer<LookupElement>() {
+        override fun renderElement(element: LookupElement, presentation: LookupElementPresentation) {
+            presentation.itemText = element.lookupString.replace(CRLF, "↩").replace("\t", "⇥")
+        }
+    }
+
 
     private companion object {
 
+        val logger = logger<TranslateAndReplaceAction>()
+
         /** 谷歌翻译的空格符：`  -   　` */
-         val SPACES = Regex("[\u00a0\u2000-\u200a\u202f\u205f\u3000]")
+        val SPACES = Regex("[\u00a0\u2000-\u200a\u202f\u205f\u3000]")
+
+        val CRLF = Regex("\r\n|\r|\n")
 
         val HIGHLIGHT_ATTRIBUTES = TextAttributes().apply {
             effectType = EffectType.BOXED
@@ -173,18 +225,19 @@ class TranslateAndReplaceAction : AutoSelectAction(true, NON_WHITESPACE_CONDITIO
         fun String.fixWhitespace() = replace(SPACES, " ")
 
         fun Editor.showTargetLanguagesPopup(onChosen: (Lang) -> Unit) {
-            val appStorage = AppStorage
-            val languages = TranslateService.translator.supportedTargetLanguages.sortedByDescending {
-                if (it == Lang.AUTO) Int.MAX_VALUE else appStorage.getLanguageScore(it)
+            val states = TranslationStates.getInstance()
+            val translateService = TranslateService.getInstance()
+            val languages = translateService.translator.supportedTargetLanguages.sortedByDescending {
+                if (it == Lang.AUTO) Int.MAX_VALUE else states.getLanguageScore(it)
             }
-            val index = languages.indexOf(appStorage.lastReplacementTargetLanguage)
+            val index = languages.indexOf(states.lastReplacementTargetLanguage)
 
             val step = object : SpeedSearchListPopupStep<Lang>(languages, title = message("title.targetLanguage")) {
                 override fun getTextFor(value: Lang): String = value.langName
                 override fun onChosen(selectedValue: Lang, finalChoice: Boolean): PopupStep<*>? {
                     onChosen(selectedValue)
-                    appStorage.accumulateLanguageScore(selectedValue)
-                    appStorage.lastReplacementTargetLanguage = selectedValue
+                    states.accumulateLanguageScore(selectedValue)
+                    states.lastReplacementTargetLanguage = selectedValue
                     return super.onChosen(selectedValue, true)
                 }
             }
@@ -195,16 +248,14 @@ class TranslateAndReplaceAction : AutoSelectAction(true, NON_WHITESPACE_CONDITIO
             showListPopup(step, 10)
         }
 
-
         fun Editor.canShowPopup(selectionRange: TextRange, targetText: String): Boolean {
-            return !isDisposed &&
-                    selectionRange.endOffset <= document.textLength &&
+            return selectionRange.endOffset <= document.textLength &&
                     targetText == document.getText(selectionRange) &&
                     selectionRange.containsOffset(caretModel.offset)
         }
 
         fun Editor.tryReplace(selectionRange: TextRange, elementsToReplace: List<String>): Boolean {
-            return if (elementsToReplace.size == 1 && Settings.autoReplace) {
+            return if (elementsToReplace.size == 1 && Settings.getInstance().autoReplace) {
                 replaceText(selectionRange, elementsToReplace.first())
                 true
             } else false
@@ -223,7 +274,11 @@ class TranslateAndReplaceAction : AutoSelectAction(true, NON_WHITESPACE_CONDITIO
                 }
             }
 
-            scrollingModel.scrollToCaret(ScrollType.MAKE_VISIBLE)
+            try {
+                scrollingModel.scrollToCaret(ScrollType.MAKE_VISIBLE)
+            } catch (e: Exception) {
+                logger.w("Failed to scroll to caret.", e)
+            }
             caretModel.moveToOffset(endOffset)
 
             return true
@@ -234,30 +289,41 @@ class TranslateAndReplaceAction : AutoSelectAction(true, NON_WHITESPACE_CONDITIO
             targetText: String,
             elementsToReplace: List<String>
         ): Boolean {
+            if (isDisposed) {
+                return false
+            }
             if (!canShowPopup(selectionRange, targetText)) {
                 return false
             }
             if (tryReplace(selectionRange, elementsToReplace)) {
                 return false
             }
-            if (!checkSelection(selectionRange)) {
-                return false
-            }
-            return true
+            return checkSelection(selectionRange)
         }
 
-        fun Editor.showLookup(
-            project: Project,
+        fun Editor.showResultsIfNeeds(
             selectionRange: TextRange,
             targetText: String,
-            elementsToReplace: List<String>
+            elements: List<String>
         ) {
-            if (!beforeShowPopup(selectionRange, targetText, elementsToReplace)) {
+            if (!beforeShowPopup(selectionRange, targetText, elements)) {
                 return
             }
 
+            val project = project
+            if (this is TextComponentEditor || project == null) {
+                showListPopup(selectionRange, elements)
+            } else if (!project.isDisposed) {
+                showLookup(project, selectionRange, elements)
+            }
+        }
+
+        fun Editor.showLookup(project: Project, selectionRange: TextRange, elementsToReplace: List<String>) {
             val markupModel = markupModel
-            val lookupElements = elementsToReplace.map(LookupElementBuilder::create).toTypedArray()
+            val renderer = TranslationItemRenderer()
+            val lookupElements = elementsToReplace.map {
+                LookupElementBuilder.create(it).withRenderer(renderer)
+            }.toTypedArray()
             val lookup = LookupManager.getInstance(project).showLookup(this, *lookupElements) ?: return
             val highlighter = markupModel.addHighlight(selectionRange)
 
@@ -274,19 +340,32 @@ class TranslateAndReplaceAction : AutoSelectAction(true, NON_WHITESPACE_CONDITIO
         }
 
         fun Editor.replaceText(range: TextRange, text: String) {
-            ApplicationManager.getApplication().runWriteAction {
-                document.startGuardedBlockChecking()
-                try {
-                    WriteCommandAction.runWriteCommandAction(project) {
-                        document.replaceString(range.startOffset, range.endOffset, text)
+            CommandProcessor.getInstance().executeCommand(
+                project,
+                {
+                    WriteAction.run<Throwable> {
+                        document.startGuardedBlockChecking()
+                        try {
+                            val offset = document.replaceString(range, text)
+                            selectionModel.removeSelection()
+                            caretModel.moveToOffset(offset)
+                            scrollingModel.scrollToCaret(ScrollType.MAKE_VISIBLE)
+                        } finally {
+                            document.stopGuardedBlockChecking()
+                        }
                     }
-                    selectionModel.removeSelection()
-                    caretModel.moveToOffset(range.startOffset + text.length)
-                    scrollingModel.scrollToCaret(ScrollType.MAKE_VISIBLE)
-                } finally {
-                    document.stopGuardedBlockChecking()
-                }
-            }
+                },
+                null,
+                null
+            )
+        }
+
+        fun Document.replaceString(range: TextRange, text: String): Int {
+            val length = textLength
+            val startOffset = minOf(range.startOffset, length)
+            val endOffset = minOf(range.endOffset, length)
+            replaceString(startOffset, endOffset, text)
+            return startOffset + text.length
         }
 
         fun MarkupModel.addHighlight(selectionRange: TextRange): RangeHighlighter {
@@ -302,11 +381,7 @@ class TranslateAndReplaceAction : AutoSelectAction(true, NON_WHITESPACE_CONDITIO
             }
         }
 
-        fun TextComponentEditor.showListPopup(selectionRange: TextRange, targetText: String, elements: List<String>) {
-            if (!beforeShowPopup(selectionRange, targetText, elements)) {
-                return
-            }
-
+        fun Editor.showListPopup(selectionRange: TextRange, elements: List<String>) {
             val step = object : SpeedSearchListPopupStep<String>(elements) {
                 override fun onChosen(selectedValue: String, finalChoice: Boolean): PopupStep<*>? {
                     replaceText(selectionRange, selectedValue)
@@ -316,12 +391,19 @@ class TranslateAndReplaceAction : AutoSelectAction(true, NON_WHITESPACE_CONDITIO
             showListPopup(step, 10)
         }
 
-        fun createReplaceElements(language: Language?, items: List<String>, targetLang: Lang): List<String> {
+        fun createReplaceElements(translation: Translation, language: Language?): List<String> {
+            val translationSet = translation.dictDocument?.translations?.toMutableSet() ?: mutableSetOf()
+            translation.translation?.let { translationSet.add(it) }
+            val items = translationSet.asSequence()
+                .filter { it.isNotEmpty() }
+                .map { it.fixWhitespace() }
+                .toList()
+
             if (items.isEmpty()) {
                 return emptyList()
             }
 
-            if (targetLang != Lang.ENGLISH || language == PlainTextLanguage.INSTANCE) {
+            if (translation.targetLang != Lang.ENGLISH || language == PlainTextLanguage.INSTANCE) {
                 return items.filter { it.isNotBlank() }
             }
 
@@ -332,8 +414,9 @@ class TranslateAndReplaceAction : AutoSelectAction(true, NON_WHITESPACE_CONDITIO
             val camelBuilder = StringBuilder()
             val pascalBuilder = StringBuilder()
 
-            val lowerWithSeparatorBuilders = Settings.separators.map { it to StringBuilder() }
-            val withSeparator = Settings.separators.map { it to LinkedHashSet<String>() }.toMap()
+            val settings = Settings.getInstance()
+            val lowerWithSeparatorBuilders = settings.separators.map { it to StringBuilder() }
+            val withSeparator = settings.separators.map { it to LinkedHashSet<String>() }.toMap()
 
             for (item in items) {
                 original.add(item)
@@ -357,7 +440,7 @@ class TranslateAndReplaceAction : AutoSelectAction(true, NON_WHITESPACE_CONDITIO
                 for ((separator, builder) in lowerWithSeparatorBuilders) {
                     withSeparator.getValue(separator).apply {
                         add(builder.toString())
-                        add(builder.toString().toUpperCase())
+                        add(builder.toString().uppercase())
                     }
                 }
             }
@@ -382,7 +465,7 @@ class TranslateAndReplaceAction : AutoSelectAction(true, NON_WHITESPACE_CONDITIO
         ) {
             for (i in words.indices) {
                 val word = if (i == 0) words[i].sanitizeJavaIdentifierStart() else words[i]
-                val lowerCase = word.toLowerCase()
+                val lowerCase = word.lowercase(Locale.getDefault())
                 for ((separator, builder) in lowerWithSeparator) {
                     if (i > 0) {
                         builder.append(separator)

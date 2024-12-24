@@ -1,32 +1,27 @@
 package cn.yiiguxing.plugin.translate.trans.youdao
 
-import cn.yiiguxing.plugin.translate.HTML_DESCRIPTION_TRANSLATOR_CONFIGURATION
-import cn.yiiguxing.plugin.translate.YOUDAO_TRANSLATE_URL
+import cn.yiiguxing.plugin.translate.Settings
 import cn.yiiguxing.plugin.translate.message
 import cn.yiiguxing.plugin.translate.trans.*
 import cn.yiiguxing.plugin.translate.ui.settings.TranslationEngine.YOUDAO
 import cn.yiiguxing.plugin.translate.util.Http
-import cn.yiiguxing.plugin.translate.util.Settings
 import cn.yiiguxing.plugin.translate.util.i
-import cn.yiiguxing.plugin.translate.util.sha256
 import com.google.gson.Gson
+import com.intellij.icons.AllIcons
+import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.Logger
+import org.jsoup.nodes.Document
 import java.util.*
 import javax.swing.Icon
 
-@Suppress("SpellCheckingInspection")
-object YoudaoTranslator : AbstractTranslator() {
+object YoudaoTranslator : AbstractTranslator(), DocumentationTranslator {
 
-    private val SUPPORTED_LANGUAGES: List<Lang> = (Lang.sortedValues() - listOf(
-        Lang.CHINESE_TRADITIONAL,
-        Lang.CHINESE_CLASSICAL,
-        Lang.AFRIKAANS,
-        Lang.KYRGYZ,
-        Lang.CATALAN,
-        Lang.HMONG,
-        Lang.SERBIAN,
-        Lang.SLOVENIAN
-    )).toList()
+    private const val YOUDAO_API_SERVICE_URL = "https://openapi.youdao.com"
+    private const val YOUDAO_TEXT_TRANSLATION_API_URL = "$YOUDAO_API_SERVICE_URL/api"
+    private const val YOUDAO_HTML_TRANSLATION_API_URL = "$YOUDAO_API_SERVICE_URL/translate_html"
+    private const val YOUDAO_CONSOLE_URL = "https://ai.youdao.com/console"
+
+    private val settings: YoudaoSettings by lazy { service<YoudaoSettings>() }
 
     private val logger: Logger = Logger.getInstance(YoudaoTranslator::class.java)
 
@@ -49,11 +44,38 @@ object YoudaoTranslator : AbstractTranslator() {
     override val primaryLanguage: Lang
         get() = YOUDAO.primaryLanguage
 
-    override val supportedSourceLanguages: List<Lang> = SUPPORTED_LANGUAGES
-    override val supportedTargetLanguages: List<Lang> = SUPPORTED_LANGUAGES
+    override val supportedSourceLanguages: List<Lang> = YoudaoLanguageAdapter.sourceLanguages
+
+    override val supportedTargetLanguages: List<Lang> = YoudaoLanguageAdapter.targetLanguages
+
+    private val errorMessageMap: Map<Int, String> by lazy {
+        mapOf(
+            101 to message("error.missingParameter"),
+            102 to message("error.language.unsupported"),
+            103 to message("error.text.too.long"),
+            104 to message("error.youdao.unsupported.api"),
+            105 to message("error.youdao.unsupported.signature"),
+            106 to message("error.youdao.unsupported.response"),
+            107 to message("error.youdao.unsupported.encryptType"),
+            108 to message("error.youdao.invalidKey"),
+            109 to message("error.youdao.batchLog"),
+            110 to message("error.youdao.noInstance"),
+            111 to message("error.invalidAccount"),
+            201 to message("error.youdao.decrypt"),
+            202 to message("error.invalidSignature"),
+            203 to message("error.access.ip"),
+            301 to message("error.youdao.dictionary"),
+            302 to message("error.youdao.translation"),
+            303 to message("error.youdao.serverError"),
+            310 to message("youdao.error.message.domain.service.not.enabled"),
+            401 to message("error.account.has.run.out.of.balance")
+        )
+    }
 
     override fun checkConfiguration(force: Boolean): Boolean {
-        if (force || Settings.youdaoTranslateSettings.let { it.appId.isEmpty() || it.getAppKey().isEmpty() }) {
+        if (force || Settings.getInstance().youdaoTranslateSettings.let {
+                it.appId.isEmpty() || it.getAppKey().isEmpty()
+            }) {
             return YOUDAO.showConfigurationDialog()
         }
 
@@ -61,74 +83,108 @@ object YoudaoTranslator : AbstractTranslator() {
     }
 
     override fun doTranslate(text: String, srcLang: Lang, targetLang: Lang): Translation {
-        return SimpleTranslateClient(this, YoudaoTranslator::call, YoudaoTranslator::parseTranslation).execute(
-            text,
-            srcLang,
-            targetLang
-        )
+        return SimpleTranslateClient(this, ::call, ::parseTranslation)
+            .apply { updateCacheKey { it.update(settings.domain.value.toByteArray()) } }
+            .execute(text, srcLang, targetLang)
     }
 
-    private fun call(
-        text: String,
-        srcLang: Lang,
-        targetLang: Lang
-    ): String {
-        val settings = Settings.youdaoTranslateSettings
-        val appId = settings.appId
-        val privateKey = settings.getAppKey()
-        val salt = UUID.randomUUID().toString()
-        val curTime = (System.currentTimeMillis() / 1000).toString()
-        val qInSign = if (text.length <= 20) text else "${text.take(10)}${text.length}${text.takeLast(10)}"
-        val sign = "$appId$qInSign$salt$curTime$privateKey".sha256()
+    private fun call(text: String, srcLang: Lang, targetLang: Lang): String {
+        val params = getBaseRequestParams(text, srcLang, targetLang)
+        params["domain"] = settings.domain.value
+        params["rejectFallback"] = true.toString()
 
-        return Http.postDataFrom(
-            YOUDAO_TRANSLATE_URL,
-            "appKey" to appId,
-            "from" to srcLang.youdaoLanguageCode,
-            "to" to targetLang.youdaoLanguageCode,
-            "salt" to salt,
-            "sign" to sign,
-            "signType" to "v3",
-            "curtime" to curTime,
-            "q" to text
-        )
+        return Http.post(YOUDAO_TEXT_TRANSLATION_API_URL, params)
     }
 
-    @Suppress("UNUSED_PARAMETER")
+    private fun getBaseRequestParams(text: String, srcLang: Lang, targetLang: Lang): MutableMap<String, String> {
+        return YoudaoRequestHelper.getSignedParams(text)
+            .toMutableMap()
+            .also { params ->
+                params["from"] = srcLang.youdaoLanguageCode
+                params["to"] = targetLang.youdaoLanguageCode
+            }
+    }
+
     private fun parseTranslation(translation: String, original: String, srcLang: Lang, targetLang: Lang): Translation {
         logger.i("Translate result: $translation")
+
+        if (translation.isBlank()) {
+            return Translation(original, original, srcLang, targetLang, listOf(srcLang))
+        }
 
         return Gson().fromJson(translation, YoudaoTranslation::class.java).apply {
             query = original
             checkError()
             if (!isSuccessful) {
-                throw TranslateResultException(errorCode, name)
+                throw TranslationResultException(errorCode)
             }
         }.toTranslation()
     }
 
-    override fun createErrorMessage(throwable: Throwable): String = when (throwable) {
-        is TranslateResultException -> when (throwable.code) {
-            101 -> message("error.missingParameter")
-            102 -> message("error.language.unsupported")
-            103 -> message("error.text.too.long")
-            104 -> message("error.youdao.unsupported.api")
-            105 -> message("error.youdao.unsupported.signature")
-            106 -> message("error.youdao.unsupported.response")
-            107 -> message("error.youdao.unsupported.encryptType")
-            108 -> message("error.youdao.invalidKey", HTML_DESCRIPTION_TRANSLATOR_CONFIGURATION)
-            109 -> message("error.youdao.batchLog")
-            110 -> message("error.youdao.noInstance")
-            111 -> message("error.invalidAccount", HTML_DESCRIPTION_TRANSLATOR_CONFIGURATION)
-            201 -> message("error.youdao.decrypt")
-            202 -> message("error.invalidSignature", HTML_DESCRIPTION_TRANSLATOR_CONFIGURATION)
-            203 -> message("error.access.ip")
-            301 -> message("error.youdao.dictionary")
-            302 -> message("error.youdao.translation")
-            303 -> message("error.youdao.serverError")
-            401 -> message("error.account.has.run.out.of.balance")
-            else -> message("error.unknown") + "[${throwable.code}]"
+    override fun translateDocumentation(
+        documentation: Document,
+        srcLang: Lang,
+        targetLang: Lang
+    ): Document = checkError {
+        // Youdao does not support auto detection language for documentation translation
+        val fixedSrcLang = srcLang.takeIf { it != Lang.AUTO } ?: Lang.ENGLISH
+        val fixedTargetLang = targetLang.takeIf { it != Lang.AUTO } ?: super.defaultLangForLocale
+        documentation.translateBody { bodyHTML -> translateDocumentation(bodyHTML, fixedSrcLang, fixedTargetLang) }
+    }
+
+    private fun translateDocumentation(documentation: String, srcLang: Lang, targetLang: Lang): String {
+        val client = SimpleTranslateClient(this, ::callForDocumentation, ::parseTranslationForDocumentation)
+        client.updateCacheKey { it.update("DOCUMENTATION".toByteArray()) }
+        return client.execute(documentation, srcLang, targetLang).translation ?: ""
+    }
+
+    private fun callForDocumentation(text: String, srcLang: Lang, targetLang: Lang): String {
+        val params = getBaseRequestParams(text, srcLang, targetLang)
+        return Http.post(YOUDAO_HTML_TRANSLATION_API_URL, params)
+    }
+
+    private fun parseTranslationForDocumentation(
+        translation: String,
+        original: String,
+        srcLang: Lang,
+        targetLang: Lang
+    ): BaseTranslation {
+        logger.i("Documentation translation result: $translation")
+        return with(Gson().fromJson(translation, YoudaoHTMLTranslation::class.java)) {
+            if (errorCode != 0) {
+                throw TranslationResultException(errorCode)
+            }
+            BaseTranslation(original, srcLang, targetLang, data?.translation)
         }
-        else -> super.createErrorMessage(throwable)
+    }
+
+    override fun createErrorInfo(throwable: Throwable): ErrorInfo? {
+        if (throwable is TranslationResultException) {
+            var errorMessage =
+                errorMessageMap.getOrDefault(throwable.code, message("error.unknown") + "[${throwable.code}]")
+            val continueAction = when (throwable.code) {
+                108, 111, 202 -> ErrorInfo.continueAction(
+                    message("action.check.configuration"),
+                    icon = AllIcons.General.Settings
+                ) {
+                    YOUDAO.showConfigurationDialog()
+                }
+
+                110, 310 -> ErrorInfo.browseUrlAction(message("youdao.action.enable.service"), YOUDAO_CONSOLE_URL)
+
+                302 -> {
+                    if (settings.domain != YoudaoDomain.GENERAL) {
+                        errorMessage = message("youdao.error.message.domain.service.not.enabled")
+                        ErrorInfo.browseUrlAction(message("youdao.action.enable.service"), YOUDAO_CONSOLE_URL)
+                    } else null
+                }
+
+                else -> null
+            }
+
+            return ErrorInfo(errorMessage, if (continueAction != null) listOf(continueAction) else emptyList())
+        }
+
+        return super.createErrorInfo(throwable)
     }
 }

@@ -1,44 +1,52 @@
-<idea-plugin url="https://yiiguxing.github.io/TranslationPlugin">
+<idea-plugin url="https://yiiguxing.github.io/TranslationPlugin" require-restart="true">
     <id>cn.yiiguxing.plugin.translate</id>
     <name>Translation</name>
-    <vendor email="yii.guxing@gmail.com" url="https://github.com/YiiGuxing">Yii.Guxing</vendor>
+    <vendor email="yii.guxing@outlook.com" url="https://github.com/YiiGuxing">Yii.Guxing</vendor>
+
+    <resource-bundle>messages.LanguageBundle</resource-bundle>
+    <resource-bundle>messages.TranslationBundle</resource-bundle>
 
     <!-- please see http://www.jetbrains.org/intellij/sdk/docs/basics/getting_started/plugin_compatibility.html
          on how to target different products -->
+    <depends>com.intellij.modules.platform</depends>
     <depends optional="true" config-file="action-group.xml">com.intellij.modules.lang</depends>
-    <depends optional="true" config-file="csharp-doc.xml">com.intellij.modules.rider</depends>
-    <depends optional="true" config-file="oc-doc.xml">com.intellij.modules.cidr.lang</depends>
-    <depends optional="true" config-file="kotlin-doc.xml">org.jetbrains.kotlin</depends>
-    <depends optional="true" config-file="go-doc.xml">org.jetbrains.plugins.go</depends>
-    <depends optional="true" config-file="python-doc.xml">com.intellij.modules.python</depends>
-    <depends optional="true" config-file="dart-doc.xml">Dart</depends>
-    <depends optional="true" config-file="css-doc.xml">com.intellij.css</depends>
-    <depends optional="true" config-file="groovy-doc.xml">org.intellij.groovy</depends>
-    <depends optional="true" config-file="java-doc.xml">com.intellij.modules.java</depends>
-    <depends optional="true" config-file="javaScript-doc.xml">JavaScript</depends>
-    <depends optional="true" config-file="json-doc.xml">com.intellij.modules.json</depends>
-    <depends optional="true" config-file="jsp-doc.xml">com.intellij.jsp</depends>
-    <depends optional="true" config-file="php-doc.xml">com.jetbrains.php</depends>
-    <depends optional="true" config-file="properties-doc.xml">com.intellij.properties</depends>
-    <depends optional="true" config-file="rest-doc.xml">com.jetbrains.restClient</depends>
-    <depends optional="true" config-file="ruby-doc.xml">com.intellij.modules.ruby</depends>
-    <depends optional="true" config-file="scala-doc.xml">org.intellij.scala</depends>
-    <depends optional="true" config-file="shell-doc.xml">com.jetbrains.sh</depends>
-    <depends optional="true" config-file="sql-doc.xml">com.intellij.modules.sql</depends>
-    <depends optional="true" config-file="swift-doc.xml">com.intellij.modules.swift.lang</depends>
-    <depends optional="true" config-file="vue-doc.xml">org.jetbrains.plugins.vue</depends>
-    <depends optional="true" config-file="xml-doc.xml">com.intellij.modules.xml</depends>
-    <depends optional="true" config-file="xpath-doc.xml">XPathView</depends>
-    <depends optional="true" config-file="yaml-doc.xml">org.jetbrains.plugins.yaml</depends>
+    <depends optional="true" config-file="docs/csharp-doc.xml">com.intellij.modules.rider</depends>
+    <depends optional="true" config-file="docs/css-doc.xml">com.intellij.css</depends>
+    <depends optional="true" config-file="docs/dart-doc.xml">Dart</depends>
+    <depends optional="true" config-file="docs/go-doc.xml">org.jetbrains.plugins.go</depends>
+    <depends optional="true" config-file="docs/groovy-doc.xml">org.intellij.groovy</depends>
+    <depends optional="true" config-file="docs/java-doc.xml">com.intellij.modules.java</depends>
+    <depends optional="true" config-file="docs/javaScript-doc.xml">JavaScript</depends>
+    <depends optional="true" config-file="docs/json-doc.xml">com.intellij.modules.json</depends>
+    <depends optional="true" config-file="docs/jsp-doc.xml">com.intellij.jsp</depends>
+    <depends optional="true" config-file="docs/kotlin-doc.xml">org.jetbrains.kotlin</depends>
+    <depends optional="true" config-file="docs/oc-doc.xml">com.intellij.modules.cidr.lang</depends>
+    <depends optional="true" config-file="docs/php-doc.xml">com.jetbrains.php</depends>
+    <depends optional="true" config-file="docs/properties-doc.xml">com.intellij.properties</depends>
+    <depends optional="true" config-file="docs/python-doc.xml">com.intellij.modules.python</depends>
+    <depends optional="true" config-file="docs/rest-doc.xml">com.jetbrains.restClient</depends>
+    <depends optional="true" config-file="docs/ruby-doc.xml">com.intellij.modules.ruby</depends>
+    <depends optional="true" config-file="docs/rust-doc.xml">com.jetbrains.rust</depends>
+    <depends optional="true" config-file="docs/rust-doc2.xml">org.rust.lang</depends>
+    <depends optional="true" config-file="docs/scala-doc.xml">org.intellij.scala</depends>
+    <depends optional="true" config-file="docs/shell-doc.xml">com.jetbrains.sh</depends>
+    <depends optional="true" config-file="docs/sql-doc.xml">com.intellij.modules.sql</depends>
+    <depends optional="true" config-file="docs/swift-doc.xml">com.intellij.modules.swift.lang</depends>
+    <depends optional="true" config-file="docs/vue-doc.xml">org.jetbrains.plugins.vue</depends>
+    <depends optional="true" config-file="docs/xml-doc.xml">com.intellij.modules.xml</depends>
+    <depends optional="true" config-file="docs/xpath-doc.xml">XPathView</depends>
+    <depends optional="true" config-file="docs/yaml-doc.xml">org.jetbrains.plugins.yaml</depends>
 
     <extensionPoints>
-        <extensionPoint name="ignoredDocumentationElementsProvider"
-                        beanClass="com.intellij.lang.LanguageExtensionPoint">
+        <extensionPoint name="ignoredDocumentationElementProvider"
+                        beanClass="com.intellij.lang.LanguageExtensionPoint"
+                        dynamic="true">
             <with attribute="implementationClass"
-                  implements="cn.yiiguxing.plugin.translate.provider.IgnoredDocumentationElementsProvider"/>
+                  implements="cn.yiiguxing.plugin.translate.provider.IgnoredDocumentationElementProvider"/>
         </extensionPoint>
-        <extensionPoint name="docElementProvider"
-                        beanClass="com.intellij.lang.LanguageExtensionPoint">
+        <extensionPoint name="documentationElementProvider"
+                        beanClass="com.intellij.lang.LanguageExtensionPoint"
+                        dynamic="true">
             <with attribute="implementationClass"
                   implements="cn.yiiguxing.plugin.translate.provider.DocumentationElementProvider"/>
         </extensionPoint>
@@ -46,67 +54,80 @@
 
     <extensions defaultExtensionNs="com.intellij">
         <applicationService serviceImplementation="cn.yiiguxing.plugin.translate.Settings"/>
-        <applicationService serviceImplementation="cn.yiiguxing.plugin.translate.trans.TranslateService"/>
-        <applicationService serviceImplementation="cn.yiiguxing.plugin.translate.tts.TextToSpeech"/>
-        <applicationService serviceImplementation="cn.yiiguxing.plugin.translate.AppStorage"/>
-        <applicationService serviceImplementation="cn.yiiguxing.plugin.translate.wordbook.WordBookService"/>
+        <applicationService serviceImplementation="cn.yiiguxing.plugin.translate.TranslationStates"/>
         <applicationService serviceImplementation="cn.yiiguxing.plugin.translate.wordbook.WordBookView"/>
 
         <projectService serviceImplementation="cn.yiiguxing.plugin.translate.service.TranslationUIManager"/>
-        <applicationService serviceImplementation="cn.yiiguxing.plugin.translate.service.TranslationUIManager$AppService"/>
 
         <applicationConfigurable groupId="tools"
-                                 instance="cn.yiiguxing.plugin.translate.ui.settings.OptionsConfigurable"/>
+                                 displayName="Translation"
+                                 instance="cn.yiiguxing.plugin.translate.ui.settings.TranslationConfigurableImpl"/>
 
-        <statusBarWidgetFactory implementation="cn.yiiguxing.plugin.translate.ui.TranslatorWidgetFactory"/>
-        <toolWindow id="Word Book"
-                    icon="Icons.Wordbook"
+        <statusBarWidgetFactory id="Translation.Widget"
+                                order="before LineSeparator, after Position, before lineSeparatorWidget, after positionWidget"
+                                implementation="cn.yiiguxing.plugin.translate.ui.TranslationWidgetFactory"/>
+        <toolWindow id="Translation.Wordbook"
+                    icon="TranslationIcons.Wordbook"
                     anchor="right"
                     secondary="true"
                     doNotActivateOnStart="true"
-                    factoryClass="cn.yiiguxing.plugin.translate.wordbook.WordBookToolWindowFactory"/>
+                    factoryClass="cn.yiiguxing.plugin.translate.wordbook.WordBookToolWindowFactoryImpl"/>
 
         <postStartupActivity implementation="cn.yiiguxing.plugin.translate.update.UpdateManager"/>
+        <postStartupActivity implementation="cn.yiiguxing.plugin.translate.activity.IdeaVersionUpgradeNoticeActivity"/>
+        <postStartupActivity implementation="cn.yiiguxing.plugin.translate.activity.CheckGoogleNetworkStartupActivity"/>
         <postStartupActivity implementation="cn.yiiguxing.plugin.translate.activity.WordOfTheDayStartupActivity"/>
         <actionPromoter implementation="cn.yiiguxing.plugin.translate.action.TranslationPromoter"/>
         <documentationActionProvider
                 implementation="cn.yiiguxing.plugin.translate.documentation.TranslateDocumentationActionProvider"/>
         <webHelpProvider implementation="cn.yiiguxing.plugin.translate.provider.HelpProvider"/>
 
+        <errorHandler implementation="cn.yiiguxing.plugin.translate.diagnostic.ReportSubmitter"/>
+
         <notificationGroup id="Translation Plugin" displayType="BALLOON" isLogByDefault="true"/>
+        <notificationGroup id="Documentation translation failed" displayType="BALLOON" isLogByDefault="true"/>
         <notificationGroup id="Word Book Import/Export" displayType="BALLOON" isLogByDefault="true"/>
-        <notificationGroup id="Translation Plugin Updates" displayType="STICKY_BALLOON" isLogByDefault="false"/>
+        <notificationGroup id="Translation Plugin updated" displayType="STICKY_BALLOON" isLogByDefault="false"/>
+
+        <iconMapper mappingFile="TranslationIconMappings.json"/>
     </extensions>
+
+    <applicationListeners>
+        <listener class="cn.yiiguxing.plugin.translate.action.TitleBarActionRegistrar"
+                  topic="com.intellij.ide.AppLifecycleListener"/>
+        <listener class="cn.yiiguxing.plugin.translate.action.TitleBarActionRegistrar"
+                  topic="com.intellij.ide.plugins.DynamicPluginListener"/>
+    </applicationListeners>
 
     <actions>
         <action id="$ShowTranslationDialogAction"
-                icon="Icons.Translation"
+                icon="TranslationIcons.Translation"
                 class="cn.yiiguxing.plugin.translate.action.ShowTranslationDialogAction">
             <keyboard-shortcut keymap="$default" first-keystroke="control shift O"/>
             <keyboard-shortcut keymap="Mac OS X" first-keystroke="control meta I" replace-all="true"/>
             <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="control meta I" replace-all="true"/>
         </action>
 
-        <action id="$ChooseTranslatorAction"
-                class="cn.yiiguxing.plugin.translate.action.ChooseTranslatorAction">
+        <action id="$SwitchEngineAction"
+                class="cn.yiiguxing.plugin.translate.action.SwitchEngineAction">
             <keyboard-shortcut keymap="$default" first-keystroke="control shift S"/>
             <keyboard-shortcut keymap="Mac OS X" first-keystroke="control meta Y" replace-all="true"/>
             <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="control meta Y" replace-all="true"/>
         </action>
         <action id="$EditorTranslateAction" class="cn.yiiguxing.plugin.translate.action.EditorTranslateAction"
-                icon="Icons.Translation">
+                icon="TranslationIcons.Translation">
             <keyboard-shortcut keymap="$default" first-keystroke="control shift Y"/>
             <keyboard-shortcut keymap="Mac OS X" first-keystroke="control meta U" replace-all="true"/>
             <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="control meta U" replace-all="true"/>
         </action>
         <action id="$TranslateAndReplaceAction" class="cn.yiiguxing.plugin.translate.action.TranslateAndReplaceAction"
-                icon="Icons.TranslationReplace">
+                icon="TranslationIcons.TranslationReplace">
             <keyboard-shortcut keymap="$default" first-keystroke="control shift X"/>
             <keyboard-shortcut keymap="Mac OS X" first-keystroke="control meta O"/>
             <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="control meta O" replace-all="true"/>
         </action>
         <action id="$TranslateDocumentationAction"
-                icon="Icons.Documentation"
+                icon="TranslationIcons.Documentation"
                 class="cn.yiiguxing.plugin.translate.action.TranslateDocumentationAction"/>
         <action id="$InclusiveTranslateAction"
                 class="cn.yiiguxing.plugin.translate.action.InclusiveTranslateAction"/>
@@ -114,6 +135,9 @@
                 class="cn.yiiguxing.plugin.translate.action.ExclusiveTranslateAction"/>
         <action id="$TranslateQuickDocAction"
                 class="cn.yiiguxing.plugin.translate.action.TranslateQuickDocSelectionAction"
+                use-shortcut-of="$EditorTranslateAction"/>
+        <action id="$ToggleQuickDocTranslationAction"
+                class="cn.yiiguxing.plugin.translate.action.ToggleQuickDocTranslationAction"
                 use-shortcut-of="$EditorTranslateAction"/>
         <action id="$TranslateRenderedDocSelectionAction"
                 class="cn.yiiguxing.plugin.translate.action.TranslateRenderedDocSelectionAction"
@@ -123,21 +147,15 @@
                 use-shortcut-of="$EditorTranslateAction"/>
         <action id="$TerminalTranslationAction"
                 class="cn.yiiguxing.plugin.translate.action.TerminalTranslationAction"
-                icon="Icons.Translation"
+                icon="TranslationIcons.Translation"
                 use-shortcut-of="$EditorTranslateAction"/>
         <action id="$ShowWordOfTheDayAction"
                 icon="AllIcons.Actions.IntentionBulb"
                 class="cn.yiiguxing.plugin.translate.action.ShowWordOfTheDayAction"/>
 
-        <action id="$WhatsNewInTranslationAction"
-                class="cn.yiiguxing.plugin.translate.action.WhatsNewAction">
-            <add-to-group group-id="HelpMenu" anchor="after" relative-to-action="WhatsNewAction"/>
-        </action>
-
-        <action id="ToggleQuickDocTranslationActionWithShortcut"
-                class="cn.yiiguxing.plugin.translate.action.ToggleQuickDocTranslationActionWithShortcut"
-                use-shortcut-of="$EditorTranslateAction">
-        </action>
+        <action id="$WhatsNewInTranslationAction" class="cn.yiiguxing.plugin.translate.action.WhatsNewAction"/>
+        <action id="$TranslationGettingStartAction" class="cn.yiiguxing.plugin.translate.action.GettingStartedAction"/>
+        <action id="Translation.SupportAction" class="cn.yiiguxing.plugin.translate.action.SupportAction"/>
 
         <action id="PinBalloonAction"
                 class="cn.yiiguxing.plugin.translate.action.PinBalloonAction"
@@ -163,6 +181,9 @@
 
             <add-to-group group-id="MainToolBar" anchor="last"/>
         </group>
+        <group id="TranslationTitleBar" text="Translation Title Bar Actions">
+            <reference ref="$ShowTranslationDialogAction"/>
+        </group>
         <group id="TranslationGroup.Expanded" popup="true" text="Expanded">
             <reference ref="$ShowTranslationDialogAction"/>
             <reference ref="$InclusiveTranslateAction"/>
@@ -174,6 +195,25 @@
             <reference ref="$TranslateAndReplaceAction"/>
             <reference ref="TranslationGroup.Expanded"/>
             <separator/>
+        </group>
+        <group id="Documentation.PrimaryTranslationGroup">
+            <separator/>
+            <reference ref="$TranslateQuickDocAction"/>
+            <reference ref="$ToggleQuickDocTranslationAction"/>
+
+            <add-to-group group-id="Documentation.PrimaryGroup"/>
+        </group>
+        <group id="TranslationHelpGroup" text="Translation" icon="TranslationIcons.Logo" popup="true">
+            <reference ref="$WhatsNewInTranslationAction"/>
+            <reference ref="$TranslationGettingStartAction"/>
+            <reference ref="Translation.SupportAction"/>
+        </group>
+        <group id="$TranslationHelpGroup" text="TranslationHelpGroup">
+            <separator/>
+            <reference ref="TranslationHelpGroup"/>
+            <separator/>
+
+            <add-to-group group-id="HelpMenu" anchor="before" relative-to-action="WhatsNewAction"/>
         </group>
     </actions>
 

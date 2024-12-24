@@ -1,50 +1,27 @@
 package cn.yiiguxing.plugin.translate.trans
 
-import java.io.IOException
-import java.net.ConnectException
-import java.net.SocketException
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
-import javax.net.ssl.SSLHandshakeException
-
-/**
- * TranslateException
- */
-open class TranslateException(
-    override val message: String,
-    private val translatorName: String,
+class TranslateException(
+    @Suppress("MemberVisibilityCanBePrivate")
+    val translatorId: String,
+    val translatorName: String,
+    val errorInfo: ErrorInfo,
     cause: Throwable? = null
-) : RuntimeException(message, cause) {
-    override fun getLocalizedMessage(): String {
-        return "$translatorName :: $message"
-    }
+) : RuntimeException("$translatorName[$translatorId] :: ${errorInfo.message}", cause)
+
+class UnsupportedLanguageException(
+    val lang: Lang,
+    message: String = "Unsupported language: ${lang.langName}"
+) : RuntimeException(message)
+
+open class TranslationResultException(val code: Int) : RuntimeException("Translation result code: $code")
+
+class ContentLengthLimitException(message: String = "Content length limit exceeded") : Exception(message) {
+    constructor(limit: Int, actual: Int) : this("Content length limit exceeded, limit:$limit, actual:$actual")
 }
 
-class UnsupportedLanguageException(val lang: Lang, translatorName: String) :
-    TranslateException("Unsupported language: ${lang.langName}", translatorName)
-
-class TranslateResultException(val code: Int, translatorName: String) :
-    TranslateException("Translate failed: $code", translatorName)
-
-class NetworkException(host: String, cause: IOException) : IOException("${cause.message}. host=$host", cause) {
-    companion object {
-        fun wrapIfIsNetworkException(throwable: Throwable, host: String): Throwable {
-            return when (throwable) {
-                is SocketException,
-                is SocketTimeoutException,
-                is SSLHandshakeException,
-                is ConnectException,
-                is UnknownHostException -> NetworkException(host, throwable as IOException)
-                else -> throwable
-            }
-        }
-
-        fun unwrap(throwable: Throwable): Throwable {
-            return if (throwable is NetworkException) {
-                throwable.cause!!
-            } else {
-                throwable
-            }
-        }
+fun checkContentLength(value: String, limit: Int): String {
+    if (limit > 0 && value.length > limit) {
+        throw ContentLengthLimitException(limit, value.length)
     }
+    return value
 }

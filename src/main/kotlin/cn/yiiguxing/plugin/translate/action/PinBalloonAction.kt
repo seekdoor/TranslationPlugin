@@ -1,11 +1,11 @@
 package cn.yiiguxing.plugin.translate.action
 
+import cn.yiiguxing.intellij.compat.action.CompatDumbAwareAction
 import cn.yiiguxing.plugin.translate.message
 import cn.yiiguxing.plugin.translate.service.TranslationUIManager
-import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 
-class PinBalloonAction : AnAction() {
+class PinBalloonAction : CompatDumbAwareAction(), ImportantTranslationAction {
     init {
         templatePresentation.text = message("action.PinBalloonAction.text")
     }

@@ -1,65 +1,36 @@
 package cn.yiiguxing.plugin.translate.trans.ali
 
-import cn.yiiguxing.plugin.translate.ALI_TRANSLATE_PRODUCT_URL
-import cn.yiiguxing.plugin.translate.ALI_TRANSLATE_URL
+import cn.yiiguxing.plugin.translate.Settings
 import cn.yiiguxing.plugin.translate.message
 import cn.yiiguxing.plugin.translate.trans.*
+import cn.yiiguxing.plugin.translate.trans.Lang.Companion.toExplicit
+import cn.yiiguxing.plugin.translate.trans.ali.models.AliMTRequest
+import cn.yiiguxing.plugin.translate.trans.ali.models.AliMTResponse
+import cn.yiiguxing.plugin.translate.trans.ali.models.AliTranslation
+import cn.yiiguxing.plugin.translate.trans.ali.models.AliTranslationInput
 import cn.yiiguxing.plugin.translate.ui.settings.TranslationEngine.ALI
-import cn.yiiguxing.plugin.translate.util.Settings
-import cn.yiiguxing.plugin.translate.util.hmacSha1
-import cn.yiiguxing.plugin.translate.util.i
-import cn.yiiguxing.plugin.translate.util.md5Base64
+import cn.yiiguxing.plugin.translate.util.*
 import com.google.gson.Gson
-import com.google.gson.annotations.SerializedName
 import com.intellij.openapi.diagnostic.Logger
-import com.intellij.util.io.HttpRequests
-import java.net.URL
-import java.text.SimpleDateFormat
-import java.util.*
+import org.jsoup.nodes.Document
+import java.net.URLEncoder
 import javax.swing.Icon
 
 
-// https://www.aliyun.com/product/ai/base_alimt
+/**
+ * Ali translator.
+ *
+ * [Product description](https://www.aliyun.com/product/ai/base_alimt)
+ */
 object AliTranslator : AbstractTranslator(), DocumentationTranslator {
 
-    private val SUPPORTED_LANGUAGES: List<Lang> = listOf(
-        Lang.CHINESE,
-        Lang.CHINESE_TRADITIONAL,
-        Lang.ENGLISH,
-        Lang.JAPANESE,
-        Lang.KOREAN,
-        Lang.FRENCH,
-        Lang.SPANISH,
-        Lang.ITALIAN,
-        Lang.GERMAN,
-        Lang.TURKISH,
-        Lang.RUSSIAN,
-        Lang.PORTUGUESE,
-        Lang.VIETNAMESE,
-        Lang.INDONESIAN,
-        Lang.THAI,
-        Lang.MALAY,
-        Lang.ARABIC,
-        Lang.HINDI
-    )
+    private const val ALI_TRANSLATE_PRODUCT_URL = "https://www.aliyun.com/product/ai/base_alimt"
 
-    private val SUPPORTED_TARGET_LANGUAGES: List<Lang> = listOf(
-        Lang.CHINESE,
-        Lang.ENGLISH,
-        Lang.JAPANESE,
-        Lang.KOREAN,
-        Lang.FRENCH,
-        Lang.SPANISH,
-        Lang.ITALIAN,
-        Lang.GERMAN,
-        Lang.TURKISH,
-        Lang.RUSSIAN,
-        Lang.PORTUGUESE,
-        Lang.VIETNAMESE,
-        Lang.INDONESIAN,
-        Lang.THAI,
-        Lang.MALAY
-    )
+    private const val SIGNATURE_ALGORITHM = "ACS3-HMAC-SHA256"
+    private const val ACTION_TRANSLATE = "TranslateGeneral"
+
+    private val EMPTY_RESPONSE_REGEX = "\\{\\s*}".toRegex()
+
 
     private val logger: Logger = Logger.getInstance(AliTranslator::class.java)
 
@@ -76,13 +47,14 @@ object AliTranslator : AbstractTranslator(), DocumentationTranslator {
     override val primaryLanguage: Lang
         get() = ALI.primaryLanguage
 
-    override val supportedSourceLanguages: List<Lang> = SUPPORTED_LANGUAGES
-        .toMutableList()
-        .apply { add(0, Lang.AUTO) }
-    override val supportedTargetLanguages: List<Lang> = SUPPORTED_TARGET_LANGUAGES
+    override val supportedSourceLanguages: List<Lang> = AliLanguageAdapter.sourceLanguages
+
+    override val supportedTargetLanguages: List<Lang> = AliLanguageAdapter.targetLanguages
 
     override fun checkConfiguration(force: Boolean): Boolean {
-        if (force || Settings.aliTranslateSettings.let { it.appId.isEmpty() || it.getAppKey().isEmpty() }) {
+        if (force ||
+            Settings.getInstance().aliTranslateSettings.let { it.appId.isEmpty() || it.getAppKey().isEmpty() }
+        ) {
             return ALI.showConfigurationDialog()
         }
 
@@ -92,91 +64,42 @@ object AliTranslator : AbstractTranslator(), DocumentationTranslator {
     override fun doTranslate(text: String, srcLang: Lang, targetLang: Lang): Translation {
         return SimpleTranslateClient(
             this,
-            { _, _, _ -> call(text, srcLang, targetLang, false) },
+            { _, _, _ -> callTranslate(text, srcLang, targetLang, false) },
             AliTranslator::parseTranslation
         ).execute(text, srcLang, targetLang)
     }
 
-    override fun translateDocumentation(documentation: String, srcLang: Lang, targetLang: Lang): BaseTranslation {
-        return checkError {
+    override fun translateDocumentation(
+        documentation: Document,
+        srcLang: Lang,
+        targetLang: Lang
+    ): Document = checkError {
+        documentation.translateBody { bodyHTML ->
+            checkContentLength(bodyHTML, contentLengthLimit)
+
             val client = SimpleTranslateClient(
                 this,
-                { _, _, _ -> call(documentation, srcLang, targetLang, true) },
+                { _, _, _ -> callTranslate(bodyHTML, srcLang, targetLang, true) },
                 AliTranslator::parseTranslation
             )
-            with(client) {
+            val translation = with(client) {
                 updateCacheKey { it.update("DOCUMENTATION".toByteArray()) }
-                execute(documentation, srcLang, targetLang)
+                execute(bodyHTML, srcLang, targetLang)
             }
+
+            translation.translation ?: ""
         }
     }
 
-    /**
-     * 序列化json模型
-     */
-    @Suppress("MemberVisibilityCanBePrivate")
-    data class AliTranslationRequest constructor(
-        @SerializedName("SourceText")
-        val sourceText: String,
-        @SerializedName("SourceLanguage")
-        val sourceLanguage: String,
-        @SerializedName("TargetLanguage")
-        val targetLanguage: String,
-        @SerializedName("FormatType")
-        val formatType: String = "text",
-        @SerializedName("Scene")
-        val scene: String = "general"
-    )
-
-    private fun call(text: String, srcLang: Lang, targetLang: Lang, isDocumentation: Boolean): String {
+    private fun callTranslate(text: String, srcLang: Lang, targetLang: Lang, isDocumentation: Boolean): String {
         val formatType = if (isDocumentation) "html" else "text"
-        val request = AliTranslationRequest(text, srcLang.aliLanguageCode, targetLang.aliLanguageCode, formatType)
-
-        return sendHttpRequest(ALI_TRANSLATE_URL, request)
-    }
-
-    private fun sendHttpRequest(url: String, request: Any): String {
-        val body = Gson().toJson(request)
-
-        val realUrl = URL(url)
-        val accept = "application/json"
-        val contentType = "application/json"
-        val date: String = toGMTString(Date())
-        val bodyMd5: String = body.md5Base64()
-        val uuid = UUID.randomUUID().toString()
-        val stringToSign = """
-            POST
-            $accept
-            $bodyMd5
-            $contentType
-            $date
-            x-acs-signature-method:HMAC-SHA1
-            x-acs-signature-nonce:$uuid
-            x-acs-version:2019-01-02
-            ${realUrl.file}
-            """.trimIndent()
-
-        val settings = Settings.aliTranslateSettings
-
-        return HttpRequests
-            .post(url, contentType)
-            .tuner {
-                it.setRequestProperty("Accept", accept)
-                it.setRequestProperty("Content-MD5", bodyMd5)
-                it.setRequestProperty("Date", date)
-                it.setRequestProperty("Host", realUrl.host)
-                it.setRequestProperty(
-                    "Authorization",
-                    "acs ${settings.appId}:${stringToSign.hmacSha1(settings.getAppKey())}"
-                )
-                it.setRequestProperty("x-acs-signature-nonce", uuid)
-                it.setRequestProperty("x-acs-signature-method", "HMAC-SHA1")
-                it.setRequestProperty("x-acs-version", "2019-01-02") // 版本可选
-            }
-            .connect {
-                it.write(body)
-                it.readString()
-            }
+        val data = AliTranslationInput(text, srcLang.aliLanguageCode, targetLang.aliLanguageCode, formatType)
+        val request = AliMTRequest(
+            ACTION_TRANSLATE,
+            Http.MIME_TYPE_FORM,
+            Http.getFormUrlEncoded(data.toDataForm())
+        )
+        return sendRequest(request)
     }
 
     private fun parseTranslation(
@@ -186,39 +109,113 @@ object AliTranslator : AbstractTranslator(), DocumentationTranslator {
         targetLang: Lang
     ): Translation {
         logger.i("Translate result: $translation")
-        return Gson().fromJson(translation, AliTranslation::class.java).apply {
-            query = original
-            src = srcLang
-            target = targetLang
-            if (!isSuccessful) {
-                throw TranslateResultException(code, name)
-            }
-        }.toTranslation()
-    }
 
-    override fun createErrorMessage(throwable: Throwable): String = when (throwable) {
-        is TranslateResultException -> when (throwable.code) {
-            10001 -> message("error.request.timeout")
-            10002 -> message("error.systemError")
-            10003 -> message("error.bad.request")
-            10004 -> message("error.missingParameter")
-            10005 -> message("error.language.unsupported")
-            10006 -> message("error.ali.language.detecting.failed")
-            10007 -> message("error.systemError")
-            10008 -> message("error.text.too.long")
-            10009 -> message("error.ali.permission.denied")
-            10010 -> message("error.service.is.down", ALI_TRANSLATE_PRODUCT_URL)
-            10011 -> message("error.systemError")
-            10012 -> message("error.systemError")
-            10013 -> message("error.account.has.run.out.of.balance")
-            else -> message("error.unknown") + "[${throwable.code}]"
+        val explicitSrcLang = srcLang.toExplicit()
+        // 可能会返回一个空JSON对象：`{}`
+        if (translation.isBlank() || translation.trim().matches(EMPTY_RESPONSE_REGEX)) {
+            return Translation(original, original, explicitSrcLang, targetLang, listOf(explicitSrcLang))
         }
-        else -> super.createErrorMessage(throwable)
+
+        val type = type<AliMTResponse<AliTranslation>>()
+        val response: AliMTResponse<AliTranslation> = Gson().fromJson(translation, type)
+        if (!response.isSuccessful) {
+            throw AliTranslationResultException(response.code, response.message)
+        }
+
+        val aliTranslation = response.data
+        val translatedText = aliTranslation?.translated?.takeIf { it.isNotEmpty() } ?: original
+        val srcLanguage = aliTranslation?.detectedLanguage?.let { Lang.fromAliLanguageCode(it) } ?: explicitSrcLang
+        return Translation(original, translatedText, srcLanguage, targetLang, listOf(srcLanguage))
     }
 
-    private fun toGMTString(date: Date): String {
-        val df = SimpleDateFormat("E, dd MMM yyyy HH:mm:ss z", Locale.UK)
-        df.timeZone = SimpleTimeZone(0, "GMT")
-        return df.format(date)
+    private fun sendRequest(request: AliMTRequest): String {
+        signRequest(request)
+
+        val url = UrlBuilder("https://${request.uriHost}${request.uriPath}").apply {
+            request.queries.forEach { (key, value) -> addQueryParameter(key, value) }
+        }.build()
+        return Http.post(url, request.contentType, request.body) {
+            tuner { conn ->
+                request.headers.forEach { (key, value) ->
+                    conn.setRequestProperty(key, value)
+                }
+            }
+        }
+    }
+
+    private fun signRequest(request: AliMTRequest) {
+        val requestPayloadHash = request.body.sha256().lowercase()
+        request.headers["x-acs-content-sha256"] = requestPayloadHash
+
+        val headers = request.headers
+            .asSequence()
+            .filter { (key) ->
+                key.startsWith("x-acs-") ||
+                        key.equals("Host", true) ||
+                        key.equals("Content-Type", true)
+            }
+            .map { (key, value) -> key.lowercase() to value }
+            .sortedBy { (key) -> key }
+        val headerNames = headers.joinToString(";") { (key) -> key }
+        val headerContent = headers.joinToString("\n", postfix = "\n") { (key, value) -> "${key}:$value" }
+        val queries = request.queries
+            .asSequence()
+            .map { (key, value) -> "${fixedEncode(key)}=${fixedEncode(value)}" }
+            .sorted()
+            .joinToString("&")
+        val requestContent = """
+            |POST
+            |${request.uriPath}
+            |$queries
+            |$headerContent
+            |$headerNames
+            |$requestPayloadHash
+        """.trimMargin("|")
+        val requestContentHash = requestContent.sha256().lowercase()
+
+        val settings = Settings.getInstance().aliTranslateSettings
+        val signature = settings.getAppKey()
+            .takeIf { it.isNotEmpty() }
+            ?.let { key -> "$SIGNATURE_ALGORITHM\n$requestContentHash".hmacSha256(key).lowercase() }
+            ?: ""
+        val authorization =
+            "$SIGNATURE_ALGORITHM Credential=${settings.appId},SignedHeaders=$headerNames,Signature=$signature"
+        request.headers["Authorization"] = authorization
+    }
+
+    private fun fixedEncode(input: String): String {
+        return URLEncoder.encode(input, Charsets.UTF_8)
+            .replace("+", "%20")
+            .replace("*", "%2A")
+            .replace("%7E", "~")
+    }
+
+    override fun createErrorInfo(throwable: Throwable): ErrorInfo? {
+        val errorMessage = when (throwable) {
+            is AliTranslationResultException -> when (throwable.code) {
+                10010 -> return ErrorInfo(
+                    message("error.service.is.down"),
+                    ErrorInfo.browseUrlAction(message("error.service.is.down.action.name"), ALI_TRANSLATE_PRODUCT_URL)
+                )
+
+                else -> "[${throwable.errorCode}] ${throwable.errorMessage}"
+            }
+
+            is Http.StatusException -> getErrorMessage(throwable)
+
+            else -> null
+        } ?: return super.createErrorInfo(throwable)
+
+        return ErrorInfo(errorMessage)
+    }
+
+    private fun getErrorMessage(exception: Http.StatusException): String? {
+        return try {
+            exception.errorText
+                ?.let { Gson().fromJson(it, AliMTResponse::class.java) }
+                ?.let { "[${it.code}] ${it.message}" }
+        } catch (e: Exception) {
+            null
+        }
     }
 }

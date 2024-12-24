@@ -1,6 +1,9 @@
 package cn.yiiguxing.plugin.translate.ui
 
+import cn.yiiguxing.intellij.compat.action.CompatToggleAction
 import cn.yiiguxing.plugin.translate.*
+import cn.yiiguxing.plugin.translate.action.SettingsAction
+import cn.yiiguxing.plugin.translate.service.TranslationUIManager
 import cn.yiiguxing.plugin.translate.trans.Lang
 import cn.yiiguxing.plugin.translate.trans.LanguagePair
 import cn.yiiguxing.plugin.translate.trans.Translation
@@ -8,13 +11,16 @@ import cn.yiiguxing.plugin.translate.trans.text.NamedTranslationDocument
 import cn.yiiguxing.plugin.translate.trans.text.TranslationDocument
 import cn.yiiguxing.plugin.translate.trans.text.append
 import cn.yiiguxing.plugin.translate.trans.text.apply
+import cn.yiiguxing.plugin.translate.tts.TTSEngine
+import cn.yiiguxing.plugin.translate.tts.TextToSpeech
 import cn.yiiguxing.plugin.translate.ui.StyledViewer.Companion.setupActions
 import cn.yiiguxing.plugin.translate.ui.UI.disabled
 import cn.yiiguxing.plugin.translate.ui.UI.setIcons
-import cn.yiiguxing.plugin.translate.ui.settings.OptionsConfigurable
 import cn.yiiguxing.plugin.translate.ui.settings.TranslationEngine
-import cn.yiiguxing.plugin.translate.util.*
+import cn.yiiguxing.plugin.translate.util.Application
+import cn.yiiguxing.plugin.translate.util.invokeLater
 import cn.yiiguxing.plugin.translate.util.text.clear
+import cn.yiiguxing.plugin.translate.wordbook.WordBookService
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.actionSystem.*
@@ -34,28 +40,25 @@ import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.wm.IdeFocusManager
 import com.intellij.openapi.wm.IdeGlassPane
 import com.intellij.openapi.wm.impl.IdeGlassPaneImpl
-import com.intellij.ui.DocumentAdapter
-import com.intellij.ui.PopupMenuListenerAdapter
-import com.intellij.ui.WindowMoveListener
-import com.intellij.ui.WindowResizeListener
+import com.intellij.ui.*
 import com.intellij.ui.awt.RelativePoint
 import com.intellij.util.Alarm
 import com.intellij.util.ui.JBDimension
 import com.intellij.util.ui.JBUI
-import icons.Icons
+import com.intellij.util.ui.UIUtil
+import icons.TranslationIcons
 import java.awt.*
+import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.StringSelection
 import java.awt.event.*
-import javax.swing.JComponent
-import javax.swing.JTextArea
-import javax.swing.ListSelectionModel
+import javax.swing.*
 import javax.swing.event.DocumentEvent
 import javax.swing.event.PopupMenuEvent
 import kotlin.properties.Delegates
 
 class TranslationDialog(
     private val project: Project?,
-    val ui: TranslationDialogUI = TranslationDialogUiImpl(UIProvider())
+    val ui: TranslationDialogUI = TranslationDialogUiImpl(project, UIProvider(project))
 ) :
     DialogWrapper(project),
     TranslationDialogUI by ui,
@@ -65,6 +68,8 @@ class TranslationDialog(
 
     private val presenter: Presenter = TranslationPresenter(this)
     private val focusManager: IdeFocusManager = IdeFocusManager.getInstance(project)
+
+    private val states: TranslationStates = TranslationStates.getInstance()
 
     private val alarm: Alarm = Alarm(this)
     private val translateAction = Runnable { onTranslate() }
@@ -76,7 +81,7 @@ class TranslationDialog(
     private var ignoreLanguageEvent: Boolean = false
     private var ignoreInputEvent: Boolean = false
 
-    // If user selects a specific target language, the value is true
+    // If the user selects a specific target language, the value is true
     private var unequivocalTargetLang: Boolean by Delegates.observable(false) { _, _, _ ->
         updateLightningLabel()
     }
@@ -87,12 +92,14 @@ class TranslationDialog(
     private inline val sourceLang: Lang get() = sourceLangComboBox.selected!!
     private inline val targetLang: Lang get() = targetLangComboBox.selected!!
 
-    private lateinit var escListener: AWTEventListener
 
     init {
         setUndecorated(true)
         isModal = false
         window.minimumSize = JBDimension(0, 0)
+        rootPane.windowDecorationStyle = JRootPane.NONE
+        rootPane.border = PopupBorder.Factory.create(true, true)
+
         val panel = createCenterPanel()
         initComponents()
         addWindowListeners()
@@ -104,20 +111,45 @@ class TranslationDialog(
         Application.messageBus
             .connect(this)
             .subscribe(SettingsChangeListener.TOPIC, this)
+
+        Disposer.register(this, ui)
     }
 
     private fun registerESCListener() {
         val win = window
-        escListener = AWTEventListener { event ->
-            if (event is KeyEvent &&
-                event.keyCode == KeyEvent.VK_ESCAPE &&
-                !PopupUtil.handleEscKeyEvent() &&
-                !win.isFocused // close the displayed popup window first
-            ) {
-                doCancelAction()
+
+        fun isInside(event: MouseEvent): Boolean {
+            val target = RelativePoint(event)
+            if (UIUtil.isDescendingFrom(target.originalComponent, win)) {
+                return true
+            }
+            return target.screenPoint.let { point ->
+                SwingUtilities.convertPointFromScreen(point, win)
+                win.contains(point)
             }
         }
-        Toolkit.getDefaultToolkit().addAWTEventListener(escListener, AWTEvent.KEY_EVENT_MASK)
+
+        val awtEventListener = AWTEventListener { event ->
+            val needCloseDialog = when (event) {
+                is MouseEvent -> event.id == MouseEvent.MOUSE_PRESSED &&
+                        !states.pinTranslationDialog &&
+                        !isInside(event)
+
+                is KeyEvent -> event.keyCode == KeyEvent.VK_ESCAPE &&
+                        !PopupUtil.handleEscKeyEvent() &&
+                        !win.isFocused // close the displayed popup window first
+                else -> false
+            }
+            if (needCloseDialog) {
+                close()
+            }
+        }
+
+        val eventMask = AWTEvent.MOUSE_EVENT_MASK or AWTEvent.KEY_EVENT_MASK
+        Toolkit.getDefaultToolkit().addAWTEventListener(awtEventListener, eventMask)
+        Disposer.register(this) {
+            Toolkit.getDefaultToolkit().removeAWTEventListener(awtEventListener)
+        }
     }
 
     private fun registerShortcuts() {
@@ -142,11 +174,11 @@ class TranslationDialog(
             )
 
         // Toolbar buttons
-        DumbAwareAction.create { inputTTSButton.play() }
+        DumbAwareAction.create { inputTTSButton.toggle() }
             .registerCustomShortcutSet(
                 CustomShortcutSet.fromString("alt ENTER", "meta ENTER"), rootPane, this
             )
-        DumbAwareAction.create { translationTTSButton.play() }
+        DumbAwareAction.create { translationTTSButton.toggle() }
             .registerCustomShortcutSet(
                 CustomShortcutSet.fromString("shift ENTER"), rootPane, this
             )
@@ -192,6 +224,8 @@ class TranslationDialog(
         initButtons()
         initFonts(UI.getFonts(FONT_SIZE_DEFAULT, FONT_SIZE_PHONETIC))
         initDictViewer()
+
+        ui.translationFailedComponent.onRetry { onTranslate() }
         updateOnTranslation(null)
     }
 
@@ -202,10 +236,11 @@ class TranslationDialog(
                 addMouseMotionListener(it)
             }
         }
-        val glassPane = rootPane.glassPane as IdeGlassPane
 
+        val glassPane = rootPane.glassPane as IdeGlassPane
+        translationPanel.minimumSize = JBDimension(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         val resizeListener = object : WindowResizeListener(rootPane, JBUI.insets(6), null) {
-            var myCursor: Cursor? = null
+            private var myCursor: Cursor? = null
 
             override fun setCursor(content: Component, cursor: Cursor) {
                 if (myCursor !== cursor || myCursor !== Cursor.getDefaultCursor()) {
@@ -217,11 +252,6 @@ class TranslationDialog(
                     super.setCursor(content, cursor)
                 }
             }
-
-            override fun mouseReleased(event: MouseEvent?) {
-                super.mouseReleased(event)
-                storeWindowLocationAndSize()
-            }
         }
         glassPane.addMouseMotionPreprocessor(resizeListener, this.disposable)
         glassPane.addMousePreprocessor(resizeListener, this.disposable)
@@ -229,31 +259,26 @@ class TranslationDialog(
 
     private fun addWindowListeners() {
         val window = peer.window
+        val rootPane = rootPane
         window.addWindowListener(object : WindowAdapter() {
             override fun windowOpened(e: WindowEvent) {
                 window.addWindowFocusListener(object : WindowAdapter() {
                     override fun windowGainedFocus(e: WindowEvent) {
-                        setActive(true)
+                        rootPane.border = PopupBorder.Factory.create(true, true)
                     }
 
                     override fun windowLostFocus(e: WindowEvent) {
-                        setActive(false)
-                        val oppositeWindow = e.oppositeWindow
-                        if (oppositeWindow === window || oppositeWindow != null && oppositeWindow.owner === window) {
-                            return
-                        }
-                        if (!AppStorage.pinNewTranslationDialog && oppositeWindow != null) {
-                            doCancelAction()
-                        }
+                        rootPane.border = PopupBorder.Factory.create(false, true)
                     }
                 })
+                window.removeWindowListener(this)
             }
         })
     }
 
     // Close the dialog when the ESC key is pressed
     override fun createCancelAction(): ActionListener {
-        return ActionListener { doCancelAction() }
+        return ActionListener { close() }
     }
 
     private fun initLangComboBoxes() {
@@ -266,7 +291,7 @@ class TranslationDialog(
                     unequivocalTargetLang = true
                 }
 
-                AppStorage.lastLanguages.let { pair ->
+                states.lastLanguages.let { pair ->
                     pair.source = sourceLang
                     pair.target = targetLang
                 }
@@ -309,8 +334,14 @@ class TranslationDialog(
                     disabledIcon = AllIcons.Actions.Copy.disabled()
                     addActionListener { copy() }
                 }
-                val translate = JBMenuItem(message("menu.item.translate"), Icons.Translation).apply {
-                    disabledIcon = Icons.Translation.disabled()
+                val paste = if (isEditable) {
+                    JBMenuItem(message("menu.item.paste"), AllIcons.Actions.MenuPaste).apply {
+                        disabledIcon = AllIcons.Actions.MenuPaste.disabled()
+                        addActionListener { inputTextArea.paste() }
+                    }
+                } else null
+                val translate = JBMenuItem(message("menu.item.translate"), TranslationIcons.Translation).apply {
+                    disabledIcon = TranslationIcons.Translation.disabled()
                     addActionListener {
                         selectedText.takeUnless { txt -> txt.isNullOrBlank() }?.let { selectedText ->
                             if (this@setupPopupMenu === inputTextArea) {
@@ -323,12 +354,16 @@ class TranslationDialog(
                 }
 
                 add(copy)
+                paste?.let { add(it) }
                 add(translate)
+
                 addPopupMenuListener(object : PopupMenuListenerAdapter() {
                     override fun popupMenuWillBecomeVisible(e: PopupMenuEvent) {
                         val hasSelectedText = !selectedText.isNullOrBlank()
                         copy.isEnabled = hasSelectedText
                         translate.isEnabled = hasSelectedText
+                        paste?.isEnabled =
+                            CopyPasteManager.getInstance().getContents<Any>(DataFlavor.stringFlavor) != null
                     }
                 })
             }
@@ -367,10 +402,12 @@ class TranslationDialog(
         spellComponent.onSpellFixed {
             inputTextArea.text = it
             sourceLangComboBox.selected = Lang.AUTO
+            spellComponent.isVisible = false
         }
 
         fixLangComponent.onFixLanguage {
             sourceLangComboBox.selected = it
+            fixLangComponent.isVisible = false
         }
     }
 
@@ -412,12 +449,12 @@ class TranslationDialog(
         }
         expandDictViewerButton.setListener({ _, _ ->
             expandDictViewer()
-            AppStorage.newTranslationDialogCollapseDictViewer = false
+            states.translationDialogCollapseDictViewer = false
             fixWindowHeight()
         }, null)
         collapseDictViewerButton.setListener({ _, _ ->
             collapseDictViewer()
-            AppStorage.newTranslationDialogCollapseDictViewer = true
+            states.translationDialogCollapseDictViewer = true
             fixWindowHeight()
         }, null)
     }
@@ -434,14 +471,17 @@ class TranslationDialog(
 
     private fun updateStarButton(translation: Translation?) {
         fun updatePresentation(favoriteId: Long?) {
-            val icon = if (favoriteId == null) Icons.GrayStarOff else Icons.StarOn
+            val icon = if (favoriteId == null) TranslationIcons.GrayStarOff else TranslationIcons.StarOn
             starButton.setIcons(icon)
             starButton.toolTipText = StarButtons.toolTipText(favoriteId)
         }
 
         updatePresentation(translation?.favoriteId)
 
-        starButton.isEnabled = translation != null && WordBookService.canAddToWordbook(translation.original)
+        val wordBookService = WordBookService.getInstance()
+        starButton.isEnabled = translation != null
+                && (project != null || wordBookService.isInitialized)
+                && wordBookService.canAddToWordbook(translation.original)
         starButton.setListener(StarButtons.listener, translation)
 
         translation?.observableFavoriteId?.observe(this@TranslationDialog) { favoriteId, _ ->
@@ -450,8 +490,9 @@ class TranslationDialog(
     }
 
     private fun updateDetectedLangLabel(translation: Translation?) {
-        val detected = translation?.srcLang?.takeIf { sourceLang == Lang.AUTO && it != Lang.AUTO }?.langName
-
+        val detected = translation?.srcLang
+            ?.takeIf { sourceLang == Lang.AUTO && it != Lang.AUTO && it != Lang.UNKNOWN }
+            ?.langName
         detectedLanguageLabel.text = detected
         detectedLanguageLabel.isVisible = detected != null
     }
@@ -465,7 +506,10 @@ class TranslationDialog(
         targetTransliterationLabel.text = translation?.transliteration
     }
 
-    private fun updateDictViewer(dictDocument: TranslationDocument?, extraDocuments: List<NamedTranslationDocument>) {
+    private fun updateDictViewer(
+        dictDocument: TranslationDocument?,
+        extraDocuments: List<NamedTranslationDocument<*>>
+    ) {
         dictViewer.document.clear()
         dictDocument?.let {
             dictViewer.apply(it)
@@ -475,7 +519,7 @@ class TranslationDialog(
         }
 
         val hasContent = dictDocument != null || extraDocuments.isNotEmpty()
-        if (hasContent && AppStorage.newTranslationDialogCollapseDictViewer)
+        if (hasContent && states.translationDialogCollapseDictViewer)
             collapseDictViewer()
         else if (hasContent)
             expandDictViewer()
@@ -488,6 +532,10 @@ class TranslationDialog(
     }
 
     private fun requestTranslate(delay: Int = presenter.translator.intervalLimit) {
+        if (isDisposed) {
+            return
+        }
+
         alarm.apply {
             cancelAllRequests()
             addRequest(translateAction, maxOf(delay, 500))
@@ -534,12 +582,17 @@ class TranslationDialog(
         inputTTSButton.isEnabled = false
         translationTTSButton.isEnabled = false
         translationTextArea.text = "${lastTranslation?.translation ?: ""}..."
+        ui.showProgress()
+        ui.showTranslationPanel()
+        ui.translationFailedComponent.update(null as Throwable?)
     }
 
     override fun showTranslation(request: Presenter.Request, translation: Translation, fromCache: Boolean) {
         if (currentRequest != request && !fromCache) {
             return
         }
+
+        ui.hideProgress()
 
         // forcibly modify the target language
         if (translation.srcLang != Lang.AUTO &&
@@ -559,7 +612,7 @@ class TranslationDialog(
         ignoreInputEvent = true
         try {
             inputTextArea.text = translation.original
-            sourceLangComboBox.selected = translation.srcLang
+            sourceLangComboBox.selected = translation.srcLang.takeIf { it != Lang.UNKNOWN } ?: Lang.AUTO
             targetLangComboBox.selected = translation.targetLang
         } finally {
             ignoreLanguageEvent = false
@@ -573,22 +626,32 @@ class TranslationDialog(
         currentRequest = null
         lastTranslation = translation
         swapButton.isEnabled = true
-        inputTTSButton.isEnabled = TextToSpeech.isSupportLanguage(translation.srcLang)
-        translationTTSButton.isEnabled = TextToSpeech.isSupportLanguage(translation.targetLang)
+        TextToSpeech.getInstance().let { tts ->
+            inputTTSButton.isEnabled = tts.isSupportLanguage(translation.srcLang)
+            translationTTSButton.isEnabled = tts.isSupportLanguage(translation.targetLang)
+        }
         translationTextArea.text = translation.translation
         updateOnTranslation(translation)
     }
 
-    override fun showError(request: Presenter.Request, errorMessage: String, throwable: Throwable) {
+    override fun showError(request: Presenter.Request, throwable: Throwable) {
         if (currentRequest == request) {
             clearTranslation()
         }
-        Notifications.showErrorNotification(project, message("error.title"), errorMessage, throwable)
+        ui.translationFailedComponent.update(throwable)
+        ui.hideProgress()
+        ui.showErrorPanel()
     }
 
     override fun onTranslatorChanged(settings: Settings, translationEngine: TranslationEngine) {
         updateLanguages()
         requestTranslate(0)
+    }
+
+    override fun onTTSEngineChanged(settings: Settings, ttsEngine: TTSEngine) {
+        val tts = TextToSpeech.getInstance()
+        inputTTSButton.isEnabled = lastTranslation?.srcLang?.let { tts.isSupportLanguage(it) } ?: false
+        translationTTSButton.isEnabled = lastTranslation?.targetLang?.let { tts.isSupportLanguage(it) } ?: false
     }
 
     private fun updateLanguages(languagePair: LanguagePair? = null) {
@@ -608,15 +671,15 @@ class TranslationDialog(
 
     override fun show() {
         if (!isShowing) {
+            restoreWindowSize()
             super.show()
-            restoreWindowLocationAndSize()
+            restoreWindowLocation()
         }
 
         focusManager.requestFocus(inputTextArea, true)
     }
 
     fun close() {
-        storeWindowLocationAndSize()
         close(CLOSE_EXIT_CODE)
     }
 
@@ -625,12 +688,10 @@ class TranslationDialog(
             return
         }
 
+        storeWindowLocationAndSize()
+        Disposer.dispose(this)
         super.dispose()
         _disposed = true
-
-        Toolkit.getDefaultToolkit().removeAWTEventListener(escListener)
-        Disposer.dispose(this)
-        println("Translation dialog disposed.")
     }
 
     /**
@@ -724,59 +785,84 @@ class TranslationDialog(
     }
 
     private fun storeWindowLocationAndSize() {
-        AppStorage.newTranslationDialogX = window.location.x
-        AppStorage.newTranslationDialogY = window.location.y
-        AppStorage.newTranslationDialogWidth = translationPanel.width
-        AppStorage.newTranslationDialogHeight = translationPanel.height
+        states.translationDialogLocationX = window.location.x
+        states.translationDialogLocationY = window.location.y
+        states.translationDialogWidth = translationPanel.width
+        states.translationDialogHeight = translationPanel.height
 
         translationPanel.preferredSize = translationPanel.size
     }
 
-    private fun restoreWindowLocationAndSize() {
-        val savedX = AppStorage.newTranslationDialogX
-        val savedY = AppStorage.newTranslationDialogY
-        val savedWidth = AppStorage.newTranslationDialogWidth
-        val savedHeight = AppStorage.newTranslationDialogHeight
-        if (savedX != null && savedY != null) {
-            val intersectWithScreen = GraphicsEnvironment
-                .getLocalGraphicsEnvironment()
-                .screenDevices
-                .any { gd ->
-                    gd.defaultConfiguration.bounds.intersects(
-                        savedX.toDouble(),
-                        savedY.toDouble(),
-                        savedWidth.toDouble(),
-                        savedHeight.toDouble()
-                    )
-                }
-            if (intersectWithScreen) {
-                window.location = Point(savedX, savedY)
-            } else {
-                AppStorage.newTranslationDialogX = null
-                AppStorage.newTranslationDialogY = null
-            }
-        }
+    private fun restoreWindowSize() {
+        val savedWidth = states.translationDialogWidth
+        val savedHeight = states.translationDialogHeight
         val savedSize = Dimension(savedWidth, savedHeight)
         translationPanel.size = savedSize
         translationPanel.preferredSize = savedSize
         fixWindowHeight(savedWidth)
     }
 
-    private class UIProvider : TranslationDialogUiProvider {
+    private fun restoreWindowLocation() {
+        val windowLocation = Settings.getInstance().translationWindowLocation
+        if (windowLocation == WindowLocation.DEFAULT) {
+            return
+        }
+
+        val savedX = states.translationDialogLocationX
+        val savedY = states.translationDialogLocationY
+        if (savedX == null || savedY == null) {
+            return
+        }
+
+        val savedWidth = states.translationDialogWidth
+        val savedHeight = states.translationDialogHeight
+        val ownerWindow = window.owner ?: window
+        val screenDeviceBounds = GraphicsEnvironment
+            .getLocalGraphicsEnvironment()
+            .screenDevices
+            .map { sd -> sd.defaultConfiguration.bounds }
+        val isValidArea = screenDeviceBounds
+            .filter { windowLocation == WindowLocation.LAST_LOCATION || it.contains(ownerWindow.location) }
+            .any { bounds ->
+                val offset = 10
+                Rectangle(
+                    bounds.x + offset,
+                    bounds.y + offset,
+                    bounds.width - offset,
+                    bounds.height - offset
+                ).intersects(
+                    savedX.toDouble(),
+                    savedY.toDouble(),
+                    savedWidth.toDouble(),
+                    savedHeight.toDouble()
+                )
+            }
+
+        if (isValidArea) {
+            window.location = Point(savedX, savedY)
+        } else {
+            states.translationDialogLocationX = null
+            states.translationDialogLocationY = null
+        }
+    }
+
+    private class UIProvider(private val project: Project?) : TranslationDialogUiProvider {
         override fun createPinButton(): JComponent = actionButton(MyPinAction())
 
-        override fun createSettingsButton(): JComponent = actionButton(MySettingsAction())
+        override fun createSettingsButton(): JComponent = actionButton(SettingsAction {
+            TranslationUIManager.instance(project).currentTranslationDialog()?.close()
+        })
 
         private fun actionButton(action: AnAction): ActionButton =
             ActionButton(
                 action,
-                action.templatePresentation,
+                Presentation().apply { copyFrom(action.templatePresentation) },
                 ActionPlaces.UNKNOWN,
                 ActionToolbar.DEFAULT_MINIMUM_BUTTON_SIZE
             )
     }
 
-    private class MyPinAction : ToggleAction(
+    private class MyPinAction : CompatToggleAction(
         message("translation.dialog.pin.window"),
         message("translation.dialog.pin.window"),
         AllIcons.General.Pin_tab
@@ -786,21 +872,11 @@ class TranslationDialog(
         }
 
         override fun isSelected(e: AnActionEvent): Boolean {
-            return AppStorage.pinNewTranslationDialog
+            return TranslationStates.getInstance().pinTranslationDialog
         }
 
         override fun setSelected(e: AnActionEvent, state: Boolean) {
-            AppStorage.pinNewTranslationDialog = state
-        }
-    }
-
-    private class MySettingsAction : AnAction(
-        message("settings.title.translate"),
-        message("settings.title.translate"),
-        AllIcons.General.GearPlain
-    ), DumbAware {
-        override fun actionPerformed(e: AnActionEvent) {
-            OptionsConfigurable.showSettingsDialog(e.project)
+            TranslationStates.getInstance().pinTranslationDialog = state
         }
     }
 
@@ -808,5 +884,7 @@ class TranslationDialog(
     companion object {
         private const val FONT_SIZE_DEFAULT = 14
         private const val FONT_SIZE_PHONETIC = 12
+        private const val MIN_WINDOW_WIDTH = 520
+        private const val MIN_WINDOW_HEIGHT = 260
     }
 }

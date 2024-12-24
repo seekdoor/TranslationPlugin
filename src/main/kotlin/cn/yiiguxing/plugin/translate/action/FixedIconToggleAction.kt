@@ -1,22 +1,45 @@
 package cn.yiiguxing.plugin.translate.action
 
-import com.intellij.openapi.actionSystem.*
-import com.intellij.openapi.util.NlsActions
+import cn.yiiguxing.intellij.compat.action.UpdateInBackgroundCompatToggleAction
+import com.intellij.openapi.actionSystem.ActionPlaces
+import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.Presentation
+import com.intellij.openapi.actionSystem.Toggleable
+import com.intellij.openapi.util.NlsActions.ActionDescription
 import com.intellij.openapi.util.NlsActions.ActionText
 import java.util.function.Supplier
 import javax.swing.Icon
 
-abstract class FixedIconToggleAction(
-    private val icon: Icon,
-    text: Supplier<@ActionText String?>,
-    description: Supplier<@NlsActions.ActionDescription String?> = Presentation.NULL_STRING,
-) : ToggleAction(text, description, null) {
+abstract class FixedIconToggleAction : UpdateInBackgroundCompatToggleAction {
+
+    protected val icon: Icon
+
+    protected constructor(
+        icon: Icon,
+        @ActionText text: String?,
+        @ActionDescription description: String? = null
+    ) : super(text, description, icon) {
+        this.icon = icon
+    }
+
+    protected constructor(
+        icon: Icon,
+        text: Supplier<@ActionText String?>,
+        description: Supplier<@ActionDescription String?> = Presentation.NULL_STRING
+    ) : super(text, description, icon) {
+        this.icon = icon
+    }
 
     override fun update(e: AnActionEvent) {
-        val selected = isSelected(e)
+        super.update(e)
+
         val presentation = e.presentation
-        Toggleable.setSelected(presentation, selected)
-        presentation.icon = if (ActionPlaces.isPopupPlace(e.place) && selected) null else icon
+        val selected = Toggleable.isSelected(presentation)
+        presentation.icon = getIcon(e.place, selected)
+    }
+
+    protected open fun getIcon(place: String, selected: Boolean): Icon? {
+        return if (ActionPlaces.isPopupPlace(place) && selected) null else icon
     }
 
 }

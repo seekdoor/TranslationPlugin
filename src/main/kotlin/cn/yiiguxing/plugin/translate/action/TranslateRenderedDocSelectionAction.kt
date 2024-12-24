@@ -1,29 +1,31 @@
 package cn.yiiguxing.plugin.translate.action
 
+import cn.yiiguxing.intellij.compat.action.UpdateInBackgroundCompatAction
 import cn.yiiguxing.plugin.translate.adaptedMessage
 import cn.yiiguxing.plugin.translate.service.TranslationUIManager
 import cn.yiiguxing.plugin.translate.ui.balloon.BalloonImpl
 import cn.yiiguxing.plugin.translate.util.processBeforeTranslate
 import com.intellij.openapi.actionSystem.ActionManager
-import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
+import com.intellij.openapi.actionSystem.PopupAction
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.ScrollType
+import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.ui.popup.Balloon
 import com.intellij.ui.awt.RelativePoint
 import com.intellij.util.ui.PositionTracker
-import icons.Icons
+import icons.TranslationIcons
 import java.awt.Point
 import java.lang.reflect.Method
 import javax.swing.JEditorPane
 
-class TranslateRenderedDocSelectionAction : AnAction() {
+class TranslateRenderedDocSelectionAction : UpdateInBackgroundCompatAction(), ImportantTranslationAction, PopupAction, DumbAware {
 
     private val AnActionEvent.editor: Editor? get() = CommonDataKeys.EDITOR.getData(dataContext)
 
     init {
-        templatePresentation.icon = Icons.Translation
+        templatePresentation.icon = TranslationIcons.Translation
         templatePresentation.text = adaptedMessage("action.TranslateRenderedDocSelectionAction.text")
 
         // 为了在菜单项上显示快捷键提示
@@ -39,20 +41,19 @@ class TranslateRenderedDocSelectionAction : AnAction() {
             return
         }
 
-        val editorPane = getPaneWithSelection(null, editor) as? JEditorPane
-        e.presentation.isEnabledAndVisible = !editor.selectionModel.hasSelection(true) &&
-                editorPane != null && !editorPane.selectedText.isNullOrBlank()
+        e.presentation.isEnabledAndVisible = !editor.selectionModel.hasSelection(true)
+                && !editor.getInlinePaneWithSelection()?.selectedText.isNullOrBlank()
     }
 
     override fun actionPerformed(e: AnActionEvent) {
         val editor = e.editor ?: return
-        val editorPane = getPaneWithSelection(null, editor) as? JEditorPane
-        val selectedText = editorPane?.selectedText?.processBeforeTranslate()
+        val editorPane = editor.getInlinePaneWithSelection() ?: return
+        val selectedText = editorPane.selectedText?.processBeforeTranslate()
         if (selectedText.isNullOrBlank()) {
             return
         }
 
-        val positionInEditor = getSelectionPositionInEditor(editorPane) as? Point ?: return
+        val positionInEditor = editorPane.getSelectionPositionInEditor() ?: return
         val scrollingModel = editor.scrollingModel
         if (!scrollingModel.visibleAreaOnScrollingFinished.contains(positionInEditor)) {
             scrollingModel.scrollTo(editor.xyToLogicalPosition(positionInEditor), ScrollType.MAKE_VISIBLE)
@@ -69,10 +70,15 @@ class TranslateRenderedDocSelectionAction : AnAction() {
 
         private var lastPosition: RelativePoint? = null
 
-        override fun recalculateLocation(balloon: Balloon): RelativePoint {
-            val positionStartInEditor = getSelectionPositionInEditor(editorPane) as Point
-            val positionStartInPane = editorPane.modelToView(editorPane.selectionStart)
-            val positionEndInPane = editorPane.modelToView(editorPane.selectionEnd)
+
+        override fun recalculateLocation(balloon: Balloon): RelativePoint? {
+            if (balloon.isDisposed) {
+                return lastPosition
+            }
+
+            val positionStartInEditor = editorPane.getSelectionPositionInEditor() ?: return lastPosition
+            val positionStartInPane = editorPane.modelToView2D(editorPane.selectionStart)
+            val positionEndInPane = editorPane.modelToView2D(editorPane.selectionEnd)
             val positionEndXInEditor = positionEndInPane.x + positionStartInEditor.x - positionStartInPane.x
             val positionEndYInEditor = positionEndInPane.y + positionStartInEditor.y - positionStartInPane.y
             val lineHeight = editorPane.getFontMetrics(editorPane.font).height
@@ -84,17 +90,17 @@ class TranslateRenderedDocSelectionAction : AnAction() {
             (balloon as? BalloonImpl)?.setLostPointer(!isInVisibleArea)
 
             return if (isInVisibleArea) {
-                RelativePoint(editor.contentComponent, Point(x, y))
+                RelativePoint(editor.contentComponent, Point(x.toInt(), y.toInt()))
             } else {
                 lastPosition ?: RelativePoint(
                     editor.contentComponent,
-                    with(visibleArea) { Point(x + width / 3, y + height / 2) })
+                    with(visibleArea) { Point((x + width / 3).toInt(), (y + height / 2).toInt()) })
             }.also { lastPosition = it }
         }
     }
 
     companion object {
-        private val getPaneWithSelection: Method? by lazy {
+        private val getPaneWithSelectionMethod: Method? by lazy {
             try {
                 val clazz = Class.forName("com.intellij.codeInsight.documentation.render.DocRenderSelectionManager")
                 clazz.getDeclaredMethod("getPaneWithSelection", Editor::class.java)
@@ -103,13 +109,30 @@ class TranslateRenderedDocSelectionAction : AnAction() {
             }
         }
 
-        private val getSelectionPositionInEditor: Method? by lazy {
-            try {
-                val clazz = Class.forName("com.intellij.codeInsight.documentation.render.DocRenderer\$EditorPane")
-                clazz.getDeclaredMethod("getSelectionPositionInEditor")
-            } catch (e: Throwable) {
-                null
+        private fun Editor.getInlinePaneWithSelection(): JEditorPane? {
+            return getPaneWithSelectionMethod(null, this) as? JEditorPane
+        }
+
+        private var selectionPositionMethod: Method? = null
+        private var isSelectionPositionMethodInitialized = false
+
+        @Synchronized
+        private fun getSelectionPositionMethod(obj: Any): Method? {
+            if (!isSelectionPositionMethodInitialized) {
+                selectionPositionMethod = try {
+                    obj.javaClass.getDeclaredMethod("getSelectionPositionInEditor")
+                } catch (e: Throwable) {
+                    null
+                } finally {
+                    isSelectionPositionMethodInitialized = true
+                }
             }
+
+            return selectionPositionMethod
+        }
+
+        private fun JEditorPane.getSelectionPositionInEditor(): Point? {
+            return getSelectionPositionMethod(this)(this) as? Point
         }
 
         private operator fun Method?.invoke(obj: Any?, vararg args: Any?): Any? {

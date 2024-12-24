@@ -1,20 +1,24 @@
 package cn.yiiguxing.plugin.translate.action
 
+import cn.yiiguxing.intellij.compat.action.UpdateInBackgroundCompatAction
 import cn.yiiguxing.plugin.translate.adaptedMessage
 import cn.yiiguxing.plugin.translate.message
 import cn.yiiguxing.plugin.translate.service.TranslationUIManager
 import cn.yiiguxing.plugin.translate.util.processBeforeTranslate
 import com.intellij.codeInsight.documentation.DocumentationManager
 import com.intellij.codeInsight.hint.HintManagerImpl
-import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.project.DumbAware
-import icons.Icons
+import icons.TranslationIcons
 
 /**
  * Translate quick doc selection action
  */
-class TranslateQuickDocSelectionAction : AnAction(), DumbAware, HintManagerImpl.ActionToIgnore {
+class TranslateQuickDocSelectionAction :
+    UpdateInBackgroundCompatAction(),
+    DumbAware,
+    ImportantTranslationAction,
+    HintManagerImpl.ActionToIgnore {
 
     init {
         isEnabledInModalContext = true
@@ -26,7 +30,7 @@ class TranslateQuickDocSelectionAction : AnAction(), DumbAware, HintManagerImpl.
         //don't show in toolbar, invoke via context menu or with keyboard shortcut
         //to not clash with "Translate documentation" toggle
         e.presentation.isEnabledAndVisible = quickDocHasSelection(e) && !e.isFromActionToolbar
-        e.presentation.icon = Icons.Translation
+        e.presentation.icon = TranslationIcons.Translation
     }
 
     override fun actionPerformed(e: AnActionEvent) {

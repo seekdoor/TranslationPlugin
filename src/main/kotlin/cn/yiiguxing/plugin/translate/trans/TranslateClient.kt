@@ -1,6 +1,7 @@
 package cn.yiiguxing.plugin.translate.trans
 
-import cn.yiiguxing.plugin.translate.util.CacheService
+import cn.yiiguxing.plugin.translate.diagnostic.ReportException
+import cn.yiiguxing.plugin.translate.service.CacheService
 import cn.yiiguxing.plugin.translate.util.toHexString
 import cn.yiiguxing.plugin.translate.util.w
 import com.intellij.openapi.diagnostic.Logger
@@ -33,23 +34,31 @@ abstract class TranslateClient<T : BaseTranslation>(private val translator: Tran
 
     fun execute(text: String, srcLang: Lang, targetLang: Lang): T {
         if (srcLang !in translator.supportedSourceLanguages) {
-            throw UnsupportedLanguageException(srcLang, translator.name)
+            throw UnsupportedLanguageException(srcLang)
         }
         if (targetLang !in translator.supportedTargetLanguages) {
-            throw UnsupportedLanguageException(targetLang, translator.name)
+            throw UnsupportedLanguageException(targetLang)
         }
 
+        val cacheService = CacheService.getInstance()
         val cacheKey = getCacheKey(text, srcLang, targetLang)
-        val cache = CacheService.getDiskCache(cacheKey)
+        val cache = cacheService.getDiskCache(cacheKey)
         if (cache != null) try {
             return parse(cache, text, srcLang, targetLang)
         } catch (e: Throwable) {
-            LOG.w(e)
+            LOG.w("Failed to parse from disk cache.", e)
         }
 
         val result = doExecute(text, srcLang, targetLang)
-        val translation = parse(result, text, srcLang, targetLang)
-        CacheService.putDiskCache(cacheKey, result)
+        val translation = try {
+            parse(result, text, srcLang, targetLang)
+        } catch (error: Throwable) {
+            if (!skipInvestigation(error)) {
+                investigate(error, text, srcLang, targetLang, result)
+            }
+            throw error
+        }
+        cacheService.putDiskCache(cacheKey, result)
 
         return translation
     }
@@ -57,6 +66,29 @@ abstract class TranslateClient<T : BaseTranslation>(private val translator: Tran
     protected abstract fun doExecute(text: String, srcLang: Lang, targetLang: Lang): String
 
     protected abstract fun parse(translation: String, original: String, srcLang: Lang, targetLang: Lang): T
+
+    protected open fun skipInvestigation(error: Throwable): Boolean {
+        return error is TranslationResultException
+    }
+
+    private fun investigate(
+        error: Throwable,
+        requestText: String,
+        srcLang: Lang,
+        targetLang: Lang,
+        translation: String
+    ): Nothing {
+        val requestAttachment = TranslationAttachmentFactory
+            .createRequestAttachment(translator, requestText, srcLang, targetLang)
+        val translationAttachment = TranslationAttachmentFactory
+            .createTranslationAttachment(translation)
+        throw ReportException(
+            "Translation parsing failed[${translator.id}]: ${error.message}",
+            requestAttachment,
+            translationAttachment,
+            cause = error
+        )
+    }
 
     companion object {
         private val LOG = Logger.getInstance(TranslateClient::class.java)

@@ -8,15 +8,15 @@ import cn.yiiguxing.plugin.translate.trans.Lang
 import cn.yiiguxing.plugin.translate.trans.Translation
 import cn.yiiguxing.plugin.translate.trans.text.append
 import cn.yiiguxing.plugin.translate.trans.text.apply
+import cn.yiiguxing.plugin.translate.tts.TextToSpeech
 import cn.yiiguxing.plugin.translate.ui.StyledViewer.Companion.setupActions
 import cn.yiiguxing.plugin.translate.ui.UI.disabled
 import cn.yiiguxing.plugin.translate.ui.util.ScrollSynchronizer
-import cn.yiiguxing.plugin.translate.util.TextToSpeech
-import cn.yiiguxing.plugin.translate.util.WordBookService
 import cn.yiiguxing.plugin.translate.util.splitSentence
 import cn.yiiguxing.plugin.translate.util.text.appendString
 import cn.yiiguxing.plugin.translate.util.text.clear
 import cn.yiiguxing.plugin.translate.util.text.replace
+import cn.yiiguxing.plugin.translate.wordbook.WordBookService
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.ide.CopyPasteManager
@@ -32,7 +32,7 @@ import com.intellij.ui.components.panels.NonOpaquePanel
 import com.intellij.util.ui.JBDimension
 import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.components.BorderLayoutPanel
-import icons.Icons
+import icons.TranslationIcons
 import java.awt.*
 import java.awt.datatransfer.StringSelection
 import java.awt.event.FocusAdapter
@@ -76,7 +76,6 @@ abstract class TranslationPane<T : JComponent>(
 
     private var onSpellFixedHandler: ((String) -> Unit)? = null
 
-    @Suppress("SpellCheckingInspection")
     private var onRevalidateHandler: (() -> Unit)? = null
     private var onFixLanguageHandler: ((Lang) -> Unit)? = null
 
@@ -91,7 +90,7 @@ abstract class TranslationPane<T : JComponent>(
 
     private val fixLanguageLabel = JLabel("${message("tip.label.sourceLanguage")}: ")
     private val fixLanguageLink = ActionLink {
-        translation?.srclangs?.firstOrNull()?.let { lang -> onFixLanguageHandler?.invoke(lang) }
+        translation?.sourceLanguages?.firstOrNull()?.let { lang -> onFixLanguageHandler?.invoke(lang) }
     }
 
     var translation: Translation?
@@ -153,8 +152,7 @@ abstract class TranslationPane<T : JComponent>(
 
     private fun createTTSButton(block: () -> Pair<String, Lang>?): TTSButton {
         val translationPanel = this
-        return TTSButton().apply {
-            project = translationPanel.project
+        return TTSButton(translationPanel.project).apply {
             dataSource(block)
             Disposer.register(translationPanel, this)
         }
@@ -184,7 +182,7 @@ abstract class TranslationPane<T : JComponent>(
                 spellLabel.font = primaryFont.lessOn(2f)
                 spellText.font = primaryFont.deriveFont(Font.BOLD, spellLabel.font.size.toFloat())
             }
-            originalViewer.font = primaryFont.deriveScaledFont(Font.ITALIC or Font.BOLD, FONT_SIZE_LARGE)
+            originalViewer.font = primaryFont.deriveScaledFont(FONT_SIZE_LARGE)
             translationViewer.font = primaryFont.deriveScaledFont(FONT_SIZE_LARGE)
             extraViewer.font = primaryFont.biggerOn(1f)
             originalTransliterationLabel.font = phoneticFont
@@ -276,7 +274,6 @@ abstract class TranslationPane<T : JComponent>(
         spellComponent.onSpellFixed(handler)
     }
 
-    @Suppress("SpellCheckingInspection")
     fun onRevalidate(handler: () -> Unit) {
         onRevalidateHandler = handler
     }
@@ -291,8 +288,8 @@ abstract class TranslationPane<T : JComponent>(
                 disabledIcon = AllIcons.Actions.Copy.disabled()
                 addActionListener { copy() }
             }
-            val translate = JBMenuItem(message("menu.item.translate"), Icons.Translation).apply {
-                disabledIcon = Icons.Translation.disabled()
+            val translate = JBMenuItem(message("menu.item.translate"), TranslationIcons.Translation).apply {
+                disabledIcon = TranslationIcons.Translation.disabled()
                 addActionListener {
                     translation?.let { translation ->
                         selectedText.takeUnless { txt -> txt.isNullOrBlank() }?.let { selectedText ->
@@ -340,8 +337,9 @@ abstract class TranslationPane<T : JComponent>(
 
     private fun checkSourceLanguage() {
         val translation = translation
-        if (translation != null && !translation.srclangs.contains(translation.srcLang)) {
-            val visible = translation.srclangs.firstOrNull()?.langName.let {
+        val sourceLanguages = translation?.sourceLanguages
+        if (sourceLanguages != null && !sourceLanguages.contains(translation.srcLang)) {
+            val visible = sourceLanguages.firstOrNull()?.langName.let {
                 fixLanguageLink.text = it
                 !it.isNullOrEmpty()
             }
@@ -367,22 +365,23 @@ abstract class TranslationPane<T : JComponent>(
                     when (settings.ttsSource) {
                         ORIGINAL -> originalTTSLink
                         TRANSLATION -> transTTSLink
-                    }.play()
+                    }.toggle()
                 }
             } else {
                 resetComponents()
-                TextToSpeech.stop()
+                TextToSpeech.getInstance().stop()
             }
         }
     }
 
     private fun updateComponents(translation: Translation) {
-        sourceLangComponent.updateLanguage(translation.srcLang)
+        sourceLangComponent.updateLanguage(translation.srcLang.takeIf { it != Lang.UNKNOWN } ?: Lang.AUTO)
         targetLangComponent.updateLanguage(translation.targetLang)
 
-        originalTTSLink.isEnabled = TextToSpeech.isSupportLanguage(translation.srcLang)
+        val tts = TextToSpeech.getInstance()
+        originalTTSLink.isEnabled = tts.isSupportLanguage(translation.srcLang)
         transTTSLink.isEnabled =
-            !translation.translation.isNullOrEmpty() && TextToSpeech.isSupportLanguage(translation.targetLang)
+            !translation.translation.isNullOrEmpty() && tts.isSupportLanguage(translation.targetLang)
 
         updateOriginalViewer(translation)
         spellComponent.spell = translation.spell
@@ -415,7 +414,8 @@ abstract class TranslationPane<T : JComponent>(
             viewer.text = text
         }
 
-        if (WordBookService.canAddToWordbook(text)) {
+        val wordBookService = WordBookService.getInstance()
+        if ((project != null || wordBookService.isInitialized) && wordBookService.canAddToWordbook(text)) {
             viewer.appendStarButton(translation)
         }
 
@@ -425,12 +425,12 @@ abstract class TranslationPane<T : JComponent>(
 
     @Suppress("DuplicatedCode")
     private fun Viewer.appendStarButton(translation: Translation) {
-        val starIcon = if (translation.favoriteId == null) Icons.StarOff else Icons.StarOn
+        val starIcon = if (translation.favoriteId == null) TranslationIcons.StarOff else TranslationIcons.StarOn
         val starLabel = LinkLabel("", starIcon, StarButtons.listener, translation)
         starLabel.alignmentY = 0.9f
         starLabel.toolTipText = getStarButtonToolTipText(translation.favoriteId)
         translation.observableFavoriteId.observe(this@TranslationPane) { favoriteId, _ ->
-            starLabel.icon = if (favoriteId == null) Icons.StarOff else Icons.StarOn
+            starLabel.icon = if (favoriteId == null) TranslationIcons.StarOff else TranslationIcons.StarOn
             starLabel.toolTipText = getStarButtonToolTipText(favoriteId)
         }
 
@@ -513,22 +513,23 @@ abstract class TranslationPane<T : JComponent>(
 
     private fun updateExtraViewer(translation: Translation?) {
         val viewer = extraViewer
-        val wrapper = extraComponent
         viewer.document.clear()
+
+        var hasExtraContent = false
         if (translation != null) {
             translation.dictDocument?.let {
+                hasExtraContent = true
                 viewer.apply(it)
             }
             for (extraDocument in translation.extraDocuments) {
+                hasExtraContent = true
                 viewer.append(extraDocument)
             }
-            viewer.isVisible = true
-            wrapper.isVisible = true
-        } else {
-            viewer.isVisible = false
-            wrapper.isVisible = false
         }
+
         viewer.caretPosition = 0
+        viewer.isVisible = hasExtraContent
+        extraComponent.isVisible = hasExtraContent
     }
 
     private fun Viewer.updateText(text: String?) {
@@ -564,7 +565,7 @@ abstract class TranslationPane<T : JComponent>(
         private fun flow(vararg components: JComponent): JComponent {
             val gap = JBUI.scale(GAP)
             val panel = NonOpaquePanel(FlowLayout(FlowLayout.LEFT, gap, 0))
-            panel.border = JBUI.Borders.empty(0, -GAP, 0, 0)
+            panel.border = JBUI.Borders.emptyLeft(-GAP)
 
             for (component in components) {
                 panel.add(component)

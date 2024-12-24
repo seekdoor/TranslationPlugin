@@ -10,7 +10,10 @@ import com.intellij.ide.IdeTooltip;
 import com.intellij.ide.RemoteDesktopService;
 import com.intellij.ide.ui.PopupLocationTracker;
 import com.intellij.ide.ui.ScreenAreaConsumer;
+import com.intellij.openapi.Disposable;
 import com.intellij.openapi.MnemonicHelper;
+import com.intellij.openapi.actionSystem.AnAction;
+import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.ex.AnActionListener;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
@@ -632,9 +635,12 @@ public final class BalloonImpl implements Balloon, IdeTooltip.Ui, ScreenAreaCons
 
         if (ApplicationManager.getApplication() != null) {
             ApplicationManager.getApplication().getMessageBus().connect(this)
-                    .subscribe(AnActionListener.TOPIC, (AnActionListenerAdapter) (action, event) -> {
-                        if (myHideOnAction && !(action instanceof HintManagerImpl.ActionToIgnore)) {
-                            hide();
+                    .subscribe(AnActionListener.TOPIC, new AnActionListener() {
+                        @Override
+                        public void beforeActionPerformed(@NotNull AnAction action, @NotNull AnActionEvent event) {
+                            if (myHideOnAction && !(action instanceof HintManagerImpl.ActionToIgnore)) {
+                                hide();
+                            }
                         }
                     });
         }
@@ -816,7 +822,10 @@ public final class BalloonImpl implements Balloon, IdeTooltip.Ui, ScreenAreaCons
 
     @Override
     public void revalidate() {
-        revalidate(myTracker);
+        PositionTracker<Balloon> tracker = myTracker;
+        if (tracker != null) {
+            revalidate(myTracker);
+        }
     }
 
     @Override
@@ -884,49 +893,60 @@ public final class BalloonImpl implements Balloon, IdeTooltip.Ui, ScreenAreaCons
     }
 
 
+    private class MyAnimator extends Animator implements Disposable {
+
+        final JLayeredPane layeredPane;
+        final Runnable onDone;
+
+        MyAnimator(boolean forward, JLayeredPane layeredPane, Runnable onDone) {
+            super("Balloon", 8, isAnimationEnabled() ? myAnimationCycle : 0, false, forward);
+            this.layeredPane = layeredPane;
+            this.onDone = onDone;
+        }
+
+        @Override
+        public void paintNow(final int frame, final int totalFrames, final int cycle) {
+            if (myComp == null || myComp.getParent() == null || !isAnimationEnabled()) return;
+            myComp.setAlpha((float) frame / totalFrames);
+        }
+
+        @Override
+        protected void paintCycleEnd() {
+            if (myComp == null || myComp.getParent() == null) return;
+
+            if (isForward()) {
+                myComp.clear();
+                myComp.repaint();
+
+                myFadedIn = true;
+
+                if (!myFadeoutAlarm.isDisposed()) {
+                    startFadeoutTimer((int) myFadeoutTime);
+                }
+            } else {
+                layeredPane.remove(myComp);
+                layeredPane.revalidate();
+                layeredPane.repaint();
+            }
+            Disposer.dispose(this);
+        }
+
+        @Override
+        public void dispose() {
+            super.dispose();
+            myAnimator = null;
+            if (onDone != null) {
+                onDone.run();
+            }
+        }
+    }
+
     private void runAnimation(boolean forward, final JLayeredPane layeredPane, @Nullable final Runnable onDone) {
         if (myAnimator != null) {
             Disposer.dispose(myAnimator);
         }
 
-        myAnimator = new Animator("Balloon", 8, isAnimationEnabled() ? myAnimationCycle : 0, false, forward) {
-            @Override
-            public void paintNow(final int frame, final int totalFrames, final int cycle) {
-                if (myComp == null || myComp.getParent() == null || !isAnimationEnabled()) return;
-                myComp.setAlpha((float) frame / totalFrames);
-            }
-
-            @Override
-            protected void paintCycleEnd() {
-                if (myComp == null || myComp.getParent() == null) return;
-
-                if (isForward()) {
-                    myComp.clear();
-                    myComp.repaint();
-
-                    myFadedIn = true;
-
-                    if (!myFadeoutAlarm.isDisposed()) {
-                        startFadeoutTimer((int) myFadeoutTime);
-                    }
-                } else {
-                    layeredPane.remove(myComp);
-                    layeredPane.revalidate();
-                    layeredPane.repaint();
-                }
-                Disposer.dispose(this);
-            }
-
-            @Override
-            public void dispose() {
-                super.dispose();
-                myAnimator = null;
-                if (onDone != null) {
-                    onDone.run();
-                }
-            }
-        };
-
+        myAnimator = new MyAnimator(forward, layeredPane, onDone);
         myAnimator.resume();
     }
 

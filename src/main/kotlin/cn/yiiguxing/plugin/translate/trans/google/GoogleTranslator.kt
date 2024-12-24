@@ -1,25 +1,33 @@
 package cn.yiiguxing.plugin.translate.trans.google
 
-import cn.yiiguxing.plugin.translate.GOOGLE_DOCUMENTATION_TRANSLATE_URL_FORMAT
-import cn.yiiguxing.plugin.translate.GOOGLE_TRANSLATE_URL_FORMAT
+import cn.yiiguxing.plugin.translate.message
 import cn.yiiguxing.plugin.translate.trans.*
 import cn.yiiguxing.plugin.translate.ui.settings.TranslationEngine.GOOGLE
-import cn.yiiguxing.plugin.translate.util.*
+import cn.yiiguxing.plugin.translate.util.Http
+import cn.yiiguxing.plugin.translate.util.Http.setUserAgent
+import cn.yiiguxing.plugin.translate.util.UrlBuilder
+import cn.yiiguxing.plugin.translate.util.i
 import com.google.gson.*
 import com.intellij.openapi.diagnostic.Logger
+import org.jsoup.nodes.Document
 import java.lang.reflect.Type
+import java.net.HttpRetryException
 import javax.swing.Icon
 
 /**
  * GoogleTranslator
  */
 object GoogleTranslator : AbstractTranslator(), DocumentationTranslator {
-    private val settings = Settings.googleTranslateSettings
+
+    private const val TRANSLATE_API_PATH = "/translate_a/single"
+    private const val DOCUMENTATION_TRANSLATION_API_PATH = "/translate_a/t"
+
+
     private val logger: Logger = Logger.getInstance(GoogleTranslator::class.java)
 
-    @Suppress("SpellCheckingInspection")
     private val gson: Gson = GsonBuilder()
         .registerTypeAdapter(Lang::class.java, LangDeserializer)
+        .registerTypeAdapter(GDocTranslation::class.java, GDocTranslationDeserializer)
         .registerTypeAdapter(GSentence::class.java, GSentenceDeserializer)
         .create()
 
@@ -34,13 +42,12 @@ object GoogleTranslator : AbstractTranslator(), DocumentationTranslator {
     override val contentLengthLimit: Int = GOOGLE.contentLengthLimit
 
     override val primaryLanguage: Lang
-        get() = settings.primaryLanguage
+        get() = GOOGLE.primaryLanguage
 
-    private val notSupportedLanguages = listOf(Lang.CHINESE_CANTONESE, Lang.CHINESE_CLASSICAL)
+    override val supportedSourceLanguages: List<Lang> = GoogleLanguageAdapter.sourceLanguages
 
-    override val supportedSourceLanguages: List<Lang> = (Lang.sortedValues() - notSupportedLanguages).toList()
-    override val supportedTargetLanguages: List<Lang> =
-        (Lang.sortedValues() - notSupportedLanguages - Lang.AUTO).toList()
+    override val supportedTargetLanguages: List<Lang> = GoogleLanguageAdapter.targetLanguages
+
 
     override fun doTranslate(text: String, srcLang: Lang, targetLang: Lang): Translation {
         return SimpleTranslateClient(
@@ -50,29 +57,31 @@ object GoogleTranslator : AbstractTranslator(), DocumentationTranslator {
         ).execute(text, srcLang, targetLang)
     }
 
-    override fun translateDocumentation(documentation: String, srcLang: Lang, targetLang: Lang): BaseTranslation {
-        return checkError {
-            val client = SimpleTranslateClient(
-                this,
-                { _, _, _ -> call(documentation, srcLang, targetLang, true) },
-                GoogleTranslator::parseDocTranslation
-            )
-
-            client.updateCacheKey { it.update("DOCUMENTATION".toByteArray()) }
-            client.execute(documentation, srcLang, targetLang)
+    override fun translateDocumentation(
+        documentation: Document,
+        srcLang: Lang,
+        targetLang: Lang
+    ): Document = checkError {
+        documentation.translateBody { bodyHTML ->
+            translateDocumentation(bodyHTML, srcLang, targetLang)
         }
     }
 
-    private fun call(text: String, srcLang: Lang, targetLang: Lang, isDocumentation: Boolean): String {
-        val baseUrl = if (isDocumentation) {
-            GOOGLE_DOCUMENTATION_TRANSLATE_URL_FORMAT
-        } else {
-            GOOGLE_TRANSLATE_URL_FORMAT
-        }.format(GoogleHttp.googleHost)
+    private fun translateDocumentation(documentation: String, srcLang: Lang, targetLang: Lang): String {
+        val client = SimpleTranslateClient(
+            this,
+            { _, _, _ -> call(documentation, srcLang, targetLang, true) },
+            GoogleTranslator::parseDocTranslation
+        )
+        client.updateCacheKey { it.update("DOCUMENTATION".toByteArray()) }
+        return client.execute(documentation, srcLang, targetLang).translation ?: ""
+    }
 
-        val urlBuilder = UrlBuilder(baseUrl)
-            .addQueryParameter("sl", srcLang.code)
-            .addQueryParameter("tl", targetLang.code)
+    private fun call(text: String, srcLang: Lang, targetLang: Lang, isDocumentation: Boolean): String {
+        val apiPath = if (isDocumentation) DOCUMENTATION_TRANSLATION_API_PATH else TRANSLATE_API_PATH
+        val urlBuilder = UrlBuilder(googleApiUrl(apiPath))
+            .addQueryParameter("sl", srcLang.googleLanguageCode)
+            .addQueryParameter("tl", targetLang.googleLanguageCode)
 
         if (isDocumentation) {
             urlBuilder
@@ -85,7 +94,7 @@ object GoogleTranslator : AbstractTranslator(), DocumentationTranslator {
                 .addQueryParameter("dj", "1")
                 .addQueryParameter("ie", "UTF-8")
                 .addQueryParameter("oe", "UTF-8")
-                .addQueryParameter("hl", primaryLanguage.code) // 词性的语言
+                .addQueryParameter("hl", primaryLanguage.googleLanguageCode) // 词性的语言
         }
 
         val url = urlBuilder
@@ -93,12 +102,11 @@ object GoogleTranslator : AbstractTranslator(), DocumentationTranslator {
             .build()
             .also { logger.i("Translate url: $it") }
 
-        return Http.postDataFrom(url, "q" to text) {
-            userAgent().googleReferer()
+        return Http.post(url, "q" to text) {
+            setUserAgent().googleReferer()
         }
     }
 
-    @Suppress("UNUSED_PARAMETER")
     private fun parseTranslation(
         translation: String,
         original: String,
@@ -106,6 +114,10 @@ object GoogleTranslator : AbstractTranslator(), DocumentationTranslator {
         targetLang: Lang,
     ): Translation {
         logger.i("Translate result: $translation")
+
+        if (translation.isBlank()) {
+            return Translation(original, original, srcLang, targetLang, listOf(srcLang))
+        }
 
         return gson.fromJson(translation, GoogleTranslation::class.java).apply {
             this.original = original
@@ -121,19 +133,46 @@ object GoogleTranslator : AbstractTranslator(), DocumentationTranslator {
     ): BaseTranslation {
         logger.i("Translate result: $translation")
 
-        val results = gson.fromJson(translation, Array<String>::class.java)
-        val sLang = if (srcLang == Lang.AUTO) Lang[results[1]] else srcLang
+        if (translation.isBlank()) {
+            return Translation(original, original, srcLang, targetLang, listOf(srcLang))
+        }
 
-        return BaseTranslation(original, sLang, targetLang, results[0])
+        val (translatedText, lang) = gson.fromJson(translation, GDocTranslation::class.java)
+        val sLang = lang?.takeIf { srcLang == Lang.AUTO } ?: srcLang
+        return BaseTranslation(original, sLang, targetLang, translatedText)
     }
 
-    override fun onError(throwable: Throwable): Nothing {
-        super.onError(NetworkException.wrapIfIsNetworkException(throwable, GoogleHttp.googleHost))
+    override fun createErrorInfo(throwable: Throwable): ErrorInfo? {
+        if (throwable is HttpRetryException) {
+            return ErrorInfo(message("error.service.unavailable"))
+        }
+
+        return super.createErrorInfo(throwable)
+    }
+
+    private data class GDocTranslation(val translatedText: String, val lang: Lang?)
+
+    private object GDocTranslationDeserializer : JsonDeserializer<GDocTranslation> {
+        override fun deserialize(
+            json: JsonElement,
+            typeOfT: Type,
+            context: JsonDeserializationContext
+        ): GDocTranslation {
+            var array = json.asJsonArray
+            while (true) {
+                val firstElement = array.first()
+                array = if (firstElement.isJsonArray) firstElement.asJsonArray else break
+            }
+
+            val translatedText = array.first().asString
+            val lang = if (array.size() > 1) Lang.fromGoogleLanguageCode(array[1].asString) else null
+            return GDocTranslation(translatedText, lang)
+        }
     }
 
     private object LangDeserializer : JsonDeserializer<Lang> {
         override fun deserialize(jsonElement: JsonElement, type: Type, context: JsonDeserializationContext)
-                : Lang = Lang[jsonElement.asString]
+                : Lang = Lang.fromGoogleLanguageCode(jsonElement.asString)
     }
 
     @Suppress("SpellCheckingInspection")
@@ -144,9 +183,11 @@ object GoogleTranslator : AbstractTranslator(), DocumentationTranslator {
                 jsonObject.has("trans") -> {
                     context.deserialize<GTransSentence>(jsonElement, GTransSentence::class.java)
                 }
+
                 jsonObject.has("translit") || jsonObject.has("src_translit") -> {
                     context.deserialize<GTranslitSentence>(jsonElement, GTranslitSentence::class.java)
                 }
+
                 else -> throw JsonParseException("Cannot deserialize to type GSentence: $jsonElement")
             }
         }
